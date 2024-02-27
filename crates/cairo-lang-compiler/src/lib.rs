@@ -112,3 +112,34 @@ pub fn compile_prepared_db(
 
     Ok(sierra_program)
 }
+
+pub fn compile_cairo_project_at_path_with_debug_info(
+    path: &Path,
+    compiler_config: CompilerConfig<'_>,
+) -> Result<(SierraProgramWithDebug, RootDatabase)> {
+    let mut db = RootDatabase::builder().detect_corelib().build()?;
+    let main_crate_ids = setup_project(&mut db, path)?;
+    let sierra_program =
+        compile_prepared_db_with_debug_info(&mut db, main_crate_ids, compiler_config)?;
+    Ok((sierra_program, db))
+}
+
+pub fn compile_prepared_db_with_debug_info(
+    db: &mut RootDatabase,
+    main_crate_ids: Vec<CrateId>,
+    mut compiler_config: CompilerConfig<'_>,
+) -> Result<SierraProgramWithDebug> {
+    compiler_config.diagnostics_reporter.ensure(db)?;
+
+    let SierraProgramWithDebug { program: mut sierra_program, debug_info } = arc_unwrap_or_clone(
+        db.get_sierra_program(main_crate_ids)
+            .to_option()
+            .context("Compilation failed without any diagnostics")?,
+    );
+
+    if compiler_config.replace_ids {
+        sierra_program = replace_sierra_ids_in_program(db, &sierra_program);
+    }
+
+    Ok(SierraProgramWithDebug { program: sierra_program, debug_info })
+}
