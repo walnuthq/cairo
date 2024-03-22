@@ -293,6 +293,7 @@ impl<'a> PanicBlockLoweringContext<'a> {
                 self.statements.push(Statement::StructConstruct(StatementStructConstruct {
                     inputs: returns,
                     output: tupled_res,
+                    location,
                 }));
 
                 // Wrap with PanicResult::Ok.

@@ -41,7 +41,11 @@ impl Literal {
         builder: &mut StatementsBuilder,
     ) -> VarUsage {
         let output = ctx.new_var(VarRequest { ty: self.ty, location: self.location });
-        builder.push_statement(Statement::Literal(StatementLiteral { value: self.value, output }));
+        builder.push_statement(Statement::Literal(StatementLiteral {
+            value: self.value,
+            output,
+            location: self.location,
+        }));
         VarUsage { var_id: output, location: self.location }
     }
 }
@@ -246,6 +250,7 @@ impl StructConstruct {
         builder.push_statement(Statement::StructConstruct(StatementStructConstruct {
             inputs: self.inputs,
             output,
+            location: self.location,
         }));
         VarUsage { var_id: output, location: self.location }
     }

@@ -43,7 +43,7 @@ pub fn const_folding(db: &dyn LoweringGroup, lowered: &mut FlatLowered) {
     for block in lowered.blocks.iter_mut() {
         for stmt in block.statements.iter_mut() {
             match stmt {
-                Statement::Literal(StatementLiteral { value, output }) => {
+                Statement::Literal(StatementLiteral { value, output, .. }) => {
                     var_info.insert(*output, VarInfo::Literal(value.clone()));
                 }
                 Statement::Snapshot(StatementSnapshot {

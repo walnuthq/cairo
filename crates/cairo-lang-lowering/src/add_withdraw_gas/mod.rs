@@ -138,6 +138,7 @@ fn create_panic_block(
             Statement::Literal(StatementLiteral {
                 value: BigInt::from_bytes_be(Sign::Plus, "Out of gas".as_bytes()),
                 output: out_of_gas_err_var,
+                location,
             }),
             Statement::Call(StatementCall {
                 function: get_function_id(
@@ -158,6 +159,7 @@ fn create_panic_block(
             Statement::StructConstruct(StatementStructConstruct {
                 inputs: vec![],
                 output: panic_instance_var,
+                location,
             }),
             Statement::StructConstruct(StatementStructConstruct {
                 inputs: vec![panic_instance_var, panic_data_var]
@@ -165,6 +167,7 @@ fn create_panic_block(
                     .map(add_location)
                     .collect(),
                 output: err_data_var,
+                location,
             }),
         ],
         end: FlatBlockEnd::Panic(VarUsage { var_id: err_data_var, location }),

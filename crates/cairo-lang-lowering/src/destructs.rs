@@ -365,6 +365,7 @@ pub fn add_destructs(
                                     .map(|var_id| VarUsage { var_id, location })
                                     .collect(),
                                 output: tuple_var,
+                                location: lowered.variables[tuple_var].location,
                             }),
                         ];
                         lowered.blocks[block_id]

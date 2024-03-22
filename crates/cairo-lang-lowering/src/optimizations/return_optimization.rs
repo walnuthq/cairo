@@ -271,7 +271,11 @@ impl AnalyzerInfo {
     /// Replaces occurrences of `var_id` with `var_info`.
     fn replace(&mut self, var_id: VariableId, var_info: ValueInfo) {
         self.apply(&|var_usage| {
-            if var_usage.var_id == var_id { var_info.clone() } else { ValueInfo::Var(*var_usage) }
+            if var_usage.var_id == var_id {
+                var_info.clone()
+            } else {
+                ValueInfo::Var(*var_usage)
+            }
         });
     }
 
@@ -353,7 +357,7 @@ impl<'a> Analyzer<'a> for ReturnOptimizerContext<'_> {
         stmt: &'a Statement,
     ) {
         match stmt {
-            Statement::StructConstruct(StatementStructConstruct { inputs, output }) => {
+            Statement::StructConstruct(StatementStructConstruct { inputs, output, .. }) => {
                 // Note that the ValueInfo::StructConstruct can only be removed by
                 // a StructDeconstruct statement that produces its non-interchangeable inputs so
                 // allowing undroppable inputs is ok here.

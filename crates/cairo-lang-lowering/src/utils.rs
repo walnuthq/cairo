@@ -27,6 +27,7 @@ pub trait RebuilderEx: Rebuilder {
             Statement::Literal(stmt) => Statement::Literal(StatementLiteral {
                 value: stmt.value.clone(),
                 output: self.map_var_id(stmt.output),
+                location: stmt.location,
             }),
             Statement::Call(stmt) => Statement::Call(StatementCall {
                 function: stmt.function,
@@ -39,6 +40,7 @@ pub trait RebuilderEx: Rebuilder {
                 Statement::StructConstruct(StatementStructConstruct {
                     inputs: stmt.inputs.iter().map(|v| self.map_var_usage(*v)).collect(),
                     output: self.map_var_id(stmt.output),
+                    location: stmt.location,
                 })
             }
             Statement::StructDestructure(stmt) => {

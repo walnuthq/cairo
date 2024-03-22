@@ -247,9 +247,9 @@ impl Statement {
     pub fn location(&self) -> Option<LocationId> {
         // TODO(Gil): Add location to all statements.
         match &self {
-            Statement::Literal(_) => None,
+            Statement::Literal(stmt) => Some(stmt.location),
             Statement::Call(stmt) => Some(stmt.location),
-            Statement::StructConstruct(_) => None,
+            Statement::StructConstruct(stmt) => Some(stmt.location),
             Statement::StructDestructure(stmt) => Some(stmt.input.location),
             Statement::EnumConstruct(stmt) => Some(stmt.input.location),
             Statement::Snapshot(stmt) => Some(stmt.input.location),
@@ -265,6 +265,8 @@ pub struct StatementLiteral {
     pub value: BigInt,
     /// The variable to bind the value to.
     pub output: VariableId,
+    /// Location for the literal.
+    pub location: LocationId,
 }
 
 /// A statement that calls a user function.
@@ -306,6 +308,8 @@ pub struct StatementStructConstruct {
     pub inputs: Vec<VarUsage>,
     /// The variable to bind the value to.
     pub output: VariableId,
+    /// Location for the struct construction.
+    pub location: LocationId,
 }
 
 /// A statement that destructures a struct (tuple included), introducing its elements as new
