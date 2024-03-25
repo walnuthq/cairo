@@ -259,7 +259,7 @@ impl Statement {
     pub fn location(&self) -> Option<LocationId> {
         // TODO(Gil): Add location to all statements.
         match &self {
-            Statement::Const(_) => None,
+            Statement::Const(stmt) => Some(stmt.location),
             Statement::Call(stmt) => Some(stmt.location),
             Statement::StructConstruct(_) => None,
             Statement::StructDestructure(stmt) => Some(stmt.input.location),
@@ -277,6 +277,8 @@ pub struct StatementConst {
     pub value: ConstValue,
     /// The variable to bind the value to.
     pub output: VariableId,
+    /// Location for the const.
+    pub location: LocationId,
 }
 
 /// A statement that calls a user function.
