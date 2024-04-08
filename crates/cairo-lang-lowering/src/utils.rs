@@ -27,6 +27,7 @@ pub trait RebuilderEx: Rebuilder {
             Statement::Const(stmt) => Statement::Const(StatementConst {
                 value: stmt.value.clone(),
                 output: self.map_var_id(stmt.output),
+                location: stmt.location,
             }),
             Statement::Call(stmt) => Statement::Call(StatementCall {
                 function: stmt.function,
