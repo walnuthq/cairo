@@ -25,7 +25,7 @@ use thiserror::Error;
 
 pub mod compute_costs;
 pub mod core_libfunc_cost;
-mod core_libfunc_cost_base;
+pub mod core_libfunc_cost_base;
 mod core_libfunc_cost_expr;
 mod cost_expr;
 pub mod gas_info;
