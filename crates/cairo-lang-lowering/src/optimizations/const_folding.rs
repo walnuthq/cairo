@@ -83,7 +83,7 @@ pub fn const_folding(db: &dyn LoweringGroup, lowered: &mut FlatLowered) {
         for stmt in block.statements.iter_mut() {
             maybe_replace_inputs(&var_info, stmt.inputs_mut());
             match stmt {
-                Statement::Const(StatementConst { value, output }) => {
+                Statement::Const(StatementConst { value, output, .. }) => {
                     var_info.insert(*output, VarInfo::Const(value.clone()));
                 }
                 Statement::Snapshot(stmt) => {
@@ -118,15 +118,21 @@ pub fn const_folding(db: &dyn LoweringGroup, lowered: &mut FlatLowered) {
                                 );
                                 // Not inserting the value into the `var_info` map because the
                                 // resulting box isn't an actual const at the Sierra level.
-                                *stmt =
-                                    Statement::Const(StatementConst { value, output: outputs[0] });
+                                *stmt = Statement::Const(StatementConst {
+                                    value,
+                                    output: outputs[0],
+                                    location: lowered.variables[inputs[0].var_id].location,
+                                });
                             }
                         } else if extrn == upcast {
                             if let Some(VarInfo::Const(value)) = var_info.get(&inputs[0].var_id) {
                                 let value = value.clone();
                                 var_info.insert(outputs[0], VarInfo::Const(value.clone()));
-                                *stmt =
-                                    Statement::Const(StatementConst { value, output: outputs[0] });
+                                *stmt = Statement::Const(StatementConst {
+                                    value,
+                                    output: outputs[0],
+                                    location: lowered.variables[inputs[0].var_id].location,
+                                });
                             }
                         }
                     }
@@ -209,6 +215,7 @@ pub fn const_folding(db: &dyn LoweringGroup, lowered: &mut FlatLowered) {
                                     block.statements.push(Statement::Const(StatementConst {
                                         value: nz_val,
                                         output: nz_var,
+                                        location: lowered.variables[input_var].location,
                                     }));
                                     block.end =
                                         FlatBlockEnd::Goto(arm.block_id, Default::default());

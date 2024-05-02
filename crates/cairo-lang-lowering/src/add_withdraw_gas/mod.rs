@@ -138,6 +138,7 @@ fn create_panic_block(
             Statement::Const(StatementConst {
                 value: ConstValue::Int(BigInt::from_bytes_be(Sign::Plus, "Out of gas".as_bytes())),
                 output: out_of_gas_err_var,
+                location,
             }),
             Statement::Call(StatementCall {
                 function: get_function_id(

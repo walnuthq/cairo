@@ -41,7 +41,11 @@ impl Const {
         builder: &mut StatementsBuilder,
     ) -> VarUsage {
         let output = ctx.new_var(VarRequest { ty: self.ty, location: self.location });
-        builder.push_statement(Statement::Const(StatementConst { value: self.value, output }));
+        builder.push_statement(Statement::Const(StatementConst {
+            value: self.value,
+            output,
+            location: self.location,
+        }));
         VarUsage { var_id: output, location: self.location }
     }
 }
