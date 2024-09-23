@@ -66,7 +66,7 @@ pub fn const_folding(db: &dyn LoweringGroup, lowered: &mut FlatLowered) {
         for stmt in block.statements.iter_mut() {
             ctx.maybe_replace_inputs(stmt.inputs_mut());
             match stmt {
-                Statement::Const(StatementConst { value, output }) => {
+                Statement::Const(StatementConst { value, output, .. }) => {
                     // Preventing the insertion of non-member consts values (such as a `Box` of a
                     // const).
                     if matches!(
@@ -224,7 +224,11 @@ impl<'a> ConstFoldingContext<'a> {
             let ty = self.variables[output].ty;
             let value = ConstValue::Int(value, ty);
             self.var_info.insert(output, VarInfo::Const(value.clone()));
-            return Some(Statement::Const(StatementConst { value, output }));
+            return Some(Statement::Const(StatementConst {
+                value,
+                output,
+                location: stmt.location,
+            }));
         } else if stmt.function == self.storage_base_address_from_felt252 {
             let input_var = stmt.inputs[0].var_id;
             if let Some(ConstValue::Int(val, ty)) = self.as_const(input_var) {
@@ -247,12 +251,20 @@ impl<'a> ConstFoldingContext<'a> {
                 let value = ConstValue::Boxed(const_value.clone().into());
                 // Not inserting the value into the `var_info` map because the
                 // resulting box isn't an actual const at the Sierra level.
-                return Some(Statement::Const(StatementConst { value, output: stmt.outputs[0] }));
+                return Some(Statement::Const(StatementConst {
+                    value,
+                    output: stmt.outputs[0],
+                    location: stmt.location,
+                }));
             } else if extrn == self.upcast {
                 let int_value = self.as_int(stmt.inputs[0].var_id)?;
                 let value = ConstValue::Int(int_value.clone(), self.variables[stmt.outputs[0]].ty);
                 self.var_info.insert(stmt.outputs[0], VarInfo::Const(value.clone()));
-                return Some(Statement::Const(StatementConst { value, output: stmt.outputs[0] }));
+                return Some(Statement::Const(StatementConst {
+                    value,
+                    output: stmt.outputs[0],
+                    location: stmt.location,
+                }));
             }
         }
         None
@@ -283,7 +295,11 @@ impl<'a> ConstFoldingContext<'a> {
                 let nz_val = ConstValue::NonZero(Box::new(val.clone()));
                 self.var_info.insert(nz_var, VarInfo::Const(nz_val.clone()));
                 (
-                    Some(Statement::Const(StatementConst { value: nz_val, output: nz_var })),
+                    Some(Statement::Const(StatementConst {
+                        value: nz_val,
+                        output: nz_var,
+                        location: info.location,
+                    })),
                     FlatBlockEnd::Goto(arm.block_id, Default::default()),
                 )
             });
@@ -302,7 +318,11 @@ impl<'a> ConstFoldingContext<'a> {
             let value = ConstValue::Int(value, ty);
             self.var_info.insert(actual_output, VarInfo::Const(value.clone()));
             return Some((
-                Some(Statement::Const(StatementConst { value, output: actual_output })),
+                Some(Statement::Const(StatementConst {
+                    value,
+                    output: actual_output,
+                    location: info.location,
+                })),
                 FlatBlockEnd::Goto(arm.block_id, Default::default()),
             ));
         } else if self.iadd_fns.contains(&info.function) || self.isub_fns.contains(&info.function) {
@@ -321,7 +341,11 @@ impl<'a> ConstFoldingContext<'a> {
             let value = ConstValue::Int(value, ty);
             self.var_info.insert(actual_output, VarInfo::Const(value.clone()));
             return Some((
-                Some(Statement::Const(StatementConst { value, output: actual_output })),
+                Some(Statement::Const(StatementConst {
+                    value,
+                    output: actual_output,
+                    location: info.location,
+                })),
                 FlatBlockEnd::Goto(arm.block_id, Default::default()),
             ));
         } else if let Some(extrn) = info.function.get_extern(self.db) {
@@ -339,6 +363,7 @@ impl<'a> ConstFoldingContext<'a> {
                             Some(Statement::Const(StatementConst {
                                 value,
                                 output: success_output,
+                                location: info.location,
                             })),
                             FlatBlockEnd::Goto(info.arms[0].block_id, Default::default()),
                         )
