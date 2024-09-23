@@ -1,6 +1,5 @@
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 
 use cairo_lang_defs::ids::ModuleId;
 use cairo_lang_filesystem::db::{CrateConfiguration, FilesGroupEx};
@@ -60,7 +59,7 @@ pub fn setup_single_file_project(
         let module_id = ModuleId::CrateRoot(crate_id);
         let file_id = db.module_main_file(module_id).unwrap();
         db.as_files_group_mut()
-            .override_file_content(file_id, Some(Arc::new(format!("mod {file_stem};"))));
+            .override_file_content(file_id, Some(format!("mod {file_stem};").into()));
         Ok(crate_id)
     }
 }
@@ -68,11 +67,7 @@ pub fn setup_single_file_project(
 /// Updates the crate roots from a ProjectConfig object.
 pub fn update_crate_roots_from_project_config(db: &mut dyn SemanticGroup, config: &ProjectConfig) {
     for (crate_name, directory_path) in config.content.crate_roots.iter() {
-        let mut path = PathBuf::from(&directory_path);
-        if path.is_relative() {
-            path = config.base_path.clone().join(path);
-        }
-        let root = Directory::Real(path);
+        let root = Directory::Real(config.absolute_crate_root(directory_path));
         update_crate_root(db, config, crate_name.clone(), root);
     }
 }

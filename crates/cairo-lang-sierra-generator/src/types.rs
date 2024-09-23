@@ -6,16 +6,13 @@ use cairo_lang_diagnostics::Maybe;
 use cairo_lang_lowering::ids::SemanticFunctionIdEx;
 use cairo_lang_semantic as semantic;
 use cairo_lang_semantic::items::enm::SemanticEnumEx;
-use cairo_lang_semantic::items::structure::SemanticStructEx;
 use cairo_lang_sierra::extensions::snapshot::snapshot_ty;
 use cairo_lang_sierra::ids::UserTypeId;
 use cairo_lang_sierra::program::{ConcreteTypeLongId, GenericArg as SierraGenericArg};
-use cairo_lang_utils::{extract_matches, try_extract_matches, Intern, LookupIntern};
+use cairo_lang_utils::{try_extract_matches, Intern, LookupIntern};
 use itertools::chain;
 use num_traits::ToPrimitive;
-use semantic::items::constant::ConstValue;
 use semantic::items::imp::ImplLookupContext;
-use semantic::TypeId;
 
 use crate::db::{sierra_concrete_long_id, SierraGenGroup, SierraGeneratorTypeLongId};
 use crate::specialization_context::SierraSignatureSpecializationContext;
@@ -50,15 +47,14 @@ pub fn get_index_enum_type_id(
     db: &dyn SierraGenGroup,
     index_count: usize,
 ) -> Maybe<cairo_lang_sierra::ids::ConcreteTypeId> {
-    let unit = semantic::TypeLongId::Tuple(vec![]).intern(db);
-    let deps: Arc<Vec<TypeId>> = vec![unit; index_count].into();
+    let unit_ty_arg = db
+        .get_concrete_type_id(semantic::TypeLongId::Tuple(vec![]).intern(db))
+        .map(SierraGenericArg::Type)?;
     let generic_args = chain!(
-        [Ok(SierraGenericArg::UserType(format!("index_enum_type<{}>", index_count).into()))],
-        deps.iter().map(|generic_arg_ty| db
-            .get_concrete_type_id(*generic_arg_ty)
-            .map(SierraGenericArg::Type))
+        [SierraGenericArg::UserType(format!("index_enum_type<{}>", index_count).into())],
+        itertools::repeat_n(unit_ty_arg, index_count)
     )
-    .collect::<Maybe<_>>()?;
+    .collect();
     let x = SierraGeneratorTypeLongId::Regular(
         ConcreteTypeLongId { generic_id: "Enum".into(), generic_args }.into(),
     );
@@ -105,11 +101,12 @@ pub fn get_concrete_long_type_id(
                                     SierraGenericArg::Type(db.get_concrete_type_id(ty).unwrap())
                                 }
                                 semantic::GenericArgumentId::Constant(value_id) => {
-                                    SierraGenericArg::Value(extract_matches!(
-                                        value_id.lookup_intern(db),
-                                        ConstValue::Int,
-                                        "Only integer constants are supported."
-                                    ))
+                                    let value = value_id
+                                        .lookup_intern(db)
+                                        .into_int()
+                                        .expect("Expected ConstValue::Int for size");
+
+                                    SierraGenericArg::Value(value)
                                 }
                                 semantic::GenericArgumentId::Impl(_) => {
                                     panic!("Extern function with impl generics are not supported.")
@@ -158,13 +155,16 @@ pub fn get_concrete_long_type_id(
                 type_id.format(db.upcast())
             )
         }
+        semantic::TypeLongId::Closure(_) => {
+            unreachable!("Closure types should have been handled in the lowering stage.")
+        }
     })
 }
 
 /// See [SierraGenGroup::is_self_referential] for documentation.
 pub fn is_self_referential_cycle(
     _db: &dyn SierraGenGroup,
-    _cycle: &[String],
+    _cycle: &salsa::Cycle,
     _type_id: &semantic::TypeId,
 ) -> Maybe<bool> {
     Ok(true)
@@ -182,14 +182,12 @@ pub fn is_self_referential(db: &dyn SierraGenGroup, type_id: semantic::TypeId) -
 pub fn type_dependencies(
     db: &dyn SierraGenGroup,
     type_id: semantic::TypeId,
-) -> Maybe<Arc<Vec<semantic::TypeId>>> {
+) -> Maybe<Arc<[semantic::TypeId]>> {
     Ok(match type_id.lookup_intern(db) {
         semantic::TypeLongId::Concrete(ty) => match ty {
-            semantic::ConcreteTypeId::Struct(structure) => db
-                .concrete_struct_members(structure)?
-                .into_iter()
-                .map(|(_, member)| member.ty)
-                .collect(),
+            semantic::ConcreteTypeId::Struct(structure) => {
+                db.concrete_struct_members(structure)?.iter().map(|(_, member)| member.ty).collect()
+            }
             semantic::ConcreteTypeId::Enum(enm) => {
                 db.concrete_enum_variants(enm)?.into_iter().map(|variant| variant.ty).collect()
             }
@@ -202,9 +200,16 @@ pub fn type_dependencies(
         semantic::TypeLongId::Tuple(inner_types) => inner_types,
         semantic::TypeLongId::Snapshot(ty) => vec![ty],
         semantic::TypeLongId::Coupon(_) => vec![],
+        semantic::TypeLongId::Closure(_) => {
+            unreachable!("Closure types should have been handled in the lowering stage.");
+        }
         semantic::TypeLongId::FixedSizeArray { type_id, size } => {
-            let size =
-                extract_matches!(size.lookup_intern(db), ConstValue::Int).to_usize().unwrap();
+            let size = size
+                .lookup_intern(db)
+                .into_int()
+                .expect("Expected ConstValue::Int for size")
+                .to_usize()
+                .unwrap();
             [type_id].repeat(size)
         }
         semantic::TypeLongId::GenericParameter(_)

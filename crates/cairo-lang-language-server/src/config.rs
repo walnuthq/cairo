@@ -2,41 +2,59 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use anyhow::Context;
-use tower_lsp::lsp_types::ConfigurationItem;
+use serde_json::Value;
+use tower_lsp::lsp_types::{ClientCapabilities, ConfigurationItem};
 use tower_lsp::Client;
 use tracing::{debug, error, warn};
+
+use crate::lsp::client_capabilities::ClientCapabilitiesExt;
 
 // TODO(mkaput): Write a macro that will auto-generate this struct and the `reload` logic.
 // TODO(mkaput): Write a test that checks that fields in this struct are sorted alphabetically.
 // TODO(mkaput): Write a tool that syncs `configuration` in VSCode extension's `package.json`.
-// TODO(mkaput): Consider moving `SCARB` env var here. Env var must override client config,
-//  because env will be set in `scarb cairo-language-server` context.
 /// Runtime configuration for the language server.
 ///
 /// The properties stored in this struct **may** change during LS lifetime (through the
 /// [`Self::reload`] method).
-/// Therefore, it is **forbidden** to hold any references or copies of this struct or its values for
-/// longer periods of time.
+/// Therefore, holding any references or copies of this struct or its values for
+/// longer periods of time should be avoided, unless the copy will be reactively updated on
+/// `workspace/didChangeConfiguration` requests.
 #[derive(Debug, Default)]
 pub struct Config {
-    /// A user-provided fallback path to the `core` crate source code for use in projects where
-    /// `core` is unmanaged by the toolchain.
+    /// A user-provided path to the `core` crate source code for use in projects where `core` is
+    /// unmanaged by the toolchain.
     ///
-    /// This property is only used when the LS is unable to find unmanaged `core` automatically.
     /// The path may omit the `corelib/src` or `src` suffix.
     ///
     /// The property is set by the user under the `cairo1.corelibPath` key in client configuration.
-    pub unmanaged_core_fallback_path: Option<PathBuf>,
+    pub unmanaged_core_path: Option<PathBuf>,
+    /// Whether to include the trace of the generation location of diagnostic location mapped by
+    /// macros.
+    ///
+    /// The property is set by the user under the `cairo1.traceMacroDiagnostics` key in client
+    /// configuration.
+    pub trace_macro_diagnostics: bool,
 }
 
 impl Config {
     /// Reloads the configuration from the language client.
     #[tracing::instrument(name = "reload_config", level = "trace", skip_all)]
-    pub async fn reload(&mut self, client: &Client) {
-        let items = vec![ConfigurationItem {
-            scope_uri: None,
-            section: Some("cairo1.corelibPath".to_owned()),
-        }];
+    pub async fn reload(&mut self, client: &Client, client_capabilities: &ClientCapabilities) {
+        if !client_capabilities.workspace_configuration_support() {
+            warn!(
+                "client does not support `workspace/configuration` requests, config will not be \
+                 reloaded"
+            );
+            return;
+        }
+
+        let items = vec![
+            ConfigurationItem { scope_uri: None, section: Some("cairo1.corelibPath".to_owned()) },
+            ConfigurationItem {
+                scope_uri: None,
+                section: Some("cairo1.traceMacroDiagnostics".to_owned()),
+            },
+        ];
         let expected_len = items.len();
         if let Ok(response) = client
             .configuration(items)
@@ -56,8 +74,14 @@ impl Config {
             // This conversion is O(1), and makes popping from front also O(1).
             let mut response = VecDeque::from(response);
 
-            self.unmanaged_core_fallback_path =
-                response.pop_front().as_ref().and_then(|v| v.as_str()).map(Into::into);
+            self.unmanaged_core_path = response
+                .pop_front()
+                .as_ref()
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(Into::into);
+            self.trace_macro_diagnostics =
+                response.pop_front().as_ref().and_then(Value::as_bool).unwrap_or_default();
 
             debug!("reloaded configuration: {self:#?}");
         }

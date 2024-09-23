@@ -62,6 +62,7 @@ impl FlagId {
 pub enum FileLongId {
     OnDisk(PathBuf),
     Virtual(VirtualFile),
+    External(salsa::InternId),
 }
 /// Whether the file holds syntax for a module or for an expression.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -105,8 +106,8 @@ pub enum CodeOrigin {
 pub struct VirtualFile {
     pub parent: Option<FileId>,
     pub name: SmolStr,
-    pub content: Arc<String>,
-    pub code_mappings: Arc<Vec<CodeMapping>>,
+    pub content: Arc<str>,
+    pub code_mappings: Arc<[CodeMapping]>,
     pub kind: FileKind,
 }
 impl VirtualFile {
@@ -131,18 +132,21 @@ impl<'b> FileId {
                 path.file_name().and_then(|x| x.to_str()).unwrap_or("<unknown>").to_string()
             }
             FileLongId::Virtual(vf) => vf.name.to_string(),
+            FileLongId::External(external_id) => db.ext_as_virtual(external_id).name.to_string(),
         }
     }
     pub fn full_path(self, db: &dyn FilesGroup) -> String {
         match self.lookup_intern(db) {
             FileLongId::OnDisk(path) => path.to_str().unwrap_or("<unknown>").to_string(),
             FileLongId::Virtual(vf) => vf.full_path(db),
+            FileLongId::External(external_id) => db.ext_as_virtual(external_id).full_path(db),
         }
     }
     pub fn kind(self, db: &dyn FilesGroup) -> FileKind {
         match self.lookup_intern(db) {
             FileLongId::OnDisk(_) => FileKind::Module,
             FileLongId::Virtual(vf) => vf.kind.clone(),
+            FileLongId::External(_) => FileKind::Module,
         }
     }
 }

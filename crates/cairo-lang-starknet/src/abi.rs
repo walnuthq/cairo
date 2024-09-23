@@ -9,8 +9,7 @@ use cairo_lang_semantic::corelib::core_submodule;
 use cairo_lang_semantic::db::SemanticGroup;
 use cairo_lang_semantic::items::attribute::SemanticQueryAttrs;
 use cairo_lang_semantic::items::enm::SemanticEnumEx;
-use cairo_lang_semantic::items::imp::{ImplId, ImplLookupContext};
-use cairo_lang_semantic::items::structure::SemanticStructEx;
+use cairo_lang_semantic::items::imp::{ImplLongId, ImplLookupContext};
 use cairo_lang_semantic::types::{get_impl_at_context, ConcreteEnumLongId, ConcreteStructLongId};
 use cairo_lang_semantic::{
     ConcreteTraitLongId, ConcreteTypeId, GenericArgumentId, GenericParam, Mutability, Signature,
@@ -184,7 +183,7 @@ impl<'a> AbiBuilder<'a> {
         let mut structs = Vec::new();
         let mut impl_defs = Vec::new();
         let mut impl_aliases = Vec::new();
-        for item in &*self.db.module_items(ModuleId::Submodule(submodule_id)).unwrap_or_default() {
+        for item in &*self.db.module_items(ModuleId::Submodule(submodule_id))? {
             match item {
                 ModuleItemId::FreeFunction(id) => free_functions.push(*id),
                 ModuleItemId::Struct(id) => structs.push(*id),
@@ -340,12 +339,12 @@ impl<'a> AbiBuilder<'a> {
         let impl_name = impl_def_id.name(self.db.upcast());
 
         let trt = self.db.impl_def_concrete_trait(impl_def_id)?;
-        let trt_path = trt.full_path(self.db);
 
         let trait_id = trt.trait_id(self.db);
+        let interface_name = trait_id.full_path(self.db.upcast());
 
         let abi_name = impl_alias_name.unwrap_or(impl_name.into());
-        let impl_item = Item::Impl(Imp { name: abi_name, interface_name: trt_path });
+        let impl_item = Item::Impl(Imp { name: abi_name, interface_name });
         self.add_abi_item(impl_item, true, source)?;
         self.add_interface(source, trait_id)?;
 
@@ -669,7 +668,8 @@ impl<'a> AbiBuilder<'a> {
             | TypeLongId::Var(_)
             | TypeLongId::TraitType(_)
             | TypeLongId::ImplType(_)
-            | TypeLongId::Missing(_) => Err(ABIError::UnexpectedType),
+            | TypeLongId::Missing(_)
+            | TypeLongId::Closure(_) => Err(ABIError::UnexpectedType),
         }
     }
 
@@ -830,13 +830,14 @@ fn fetch_event_data(db: &dyn SemanticGroup, event_type_id: TypeId) -> Option<Eve
     let event_impl =
         get_impl_at_context(db.upcast(), ImplLookupContext::default(), concrete_trait_id, None)
             .ok()?;
-    let concrete_event_impl = try_extract_matches!(event_impl, ImplId::Concrete)?;
+    let concrete_event_impl =
+        try_extract_matches!(event_impl.lookup_intern(db), ImplLongId::Concrete)?;
     let impl_def_id = concrete_event_impl.impl_def_id(db);
 
     // Attempt to extract the event data from the aux data from the impl generation.
     let module_file = impl_def_id.module_file_id(db.upcast());
-    let file_infos = db.module_generated_file_infos(module_file.0).ok()?;
-    let aux_data = file_infos.get(module_file.1.0)?.as_ref()?.aux_data.as_ref()?;
+    let all_aux_data = db.module_generated_file_aux_data(module_file.0).ok()?;
+    let aux_data = all_aux_data.get(module_file.1.0)?.as_ref()?;
     Some(aux_data.0.as_any().downcast_ref::<StarkNetEventAuxData>()?.event_data.clone())
 }
 
@@ -885,7 +886,10 @@ pub enum ABIError {
     DuplicateEntryPointName { name: String, source_ptr: Source },
     #[error("Only supported argument for #[starknet::contract] is `account` or nothing.")]
     IllegalContractAttrArgs,
-    #[error("`{selector}` is a reserved entry point names for account contracts only.")]
+    #[error(
+        "`{selector}` is a reserved entry point name for account contracts only (marked with \
+         `#[starknet::contract(account)]`)."
+    )]
     EntryPointSupportedOnlyOnAccountContract { selector: String, source_ptr: Source },
     #[error("`{selector}` entry point must exist for account contracts.")]
     EntryPointMissingForAccountContract { selector: String },

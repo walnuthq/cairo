@@ -1,7 +1,8 @@
 use cairo_lang_defs::extract_macro_unnamed_args;
 use cairo_lang_defs::patcher::{PatchBuilder, RewriteNode};
 use cairo_lang_defs::plugin::{
-    InlineMacroExprPlugin, InlinePluginResult, NamedPlugin, PluginDiagnostic, PluginGeneratedFile,
+    InlineMacroExprPlugin, InlinePluginResult, MacroPluginMetadata, NamedPlugin, PluginDiagnostic,
+    PluginGeneratedFile,
 };
 use cairo_lang_syntax::node::db::SyntaxGroup;
 use cairo_lang_syntax::node::{ast, TypedStablePtr, TypedSyntaxNode};
@@ -18,6 +19,7 @@ impl InlineMacroExprPlugin for GetDepComponentMacro {
         &self,
         db: &dyn SyntaxGroup,
         syntax: &ast::ExprInlineMacro,
+        _metadata: &MacroPluginMetadata<'_>,
     ) -> InlinePluginResult {
         get_dep_component_generate_code_helper(db, syntax, false)
     }
@@ -34,6 +36,7 @@ impl InlineMacroExprPlugin for GetDepComponentMutMacro {
         &self,
         db: &dyn SyntaxGroup,
         syntax: &ast::ExprInlineMacro,
+        _metadata: &MacroPluginMetadata<'_>,
     ) -> InlinePluginResult {
         get_dep_component_generate_code_helper(db, syntax, true)
     }
@@ -77,14 +80,15 @@ fn get_dep_component_generate_code_helper(
         if is_mut { ("let mut", "_mut", "ref ") } else { ("let", "", "") };
     builder.add_modified(RewriteNode::interpolate_patched(
         &format!(
-        "
+            "
             {{
                 {let_part} __get_dep_component_macro_temp_contract__ = \
          HasComponent::get_contract{maybe_mut}({maybe_ref}$contract_path$);
                 $component_impl_path$::get_component{maybe_mut}({maybe_ref}\
          __get_dep_component_macro_temp_contract__)
             }}
-            "),
+            "
+        ),
         &[
             ("contract_path".to_string(), RewriteNode::new_trimmed(contract_arg.as_syntax_node())),
             (

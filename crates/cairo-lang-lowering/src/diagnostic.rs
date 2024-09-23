@@ -1,6 +1,7 @@
 use cairo_lang_defs::diagnostic_utils::StableLocation;
 use cairo_lang_diagnostics::{
     DiagnosticAdded, DiagnosticEntry, DiagnosticLocation, DiagnosticNote, DiagnosticsBuilder,
+    Severity,
 };
 use cairo_lang_semantic as semantic;
 use cairo_lang_semantic::corelib::LiteralError;
@@ -52,10 +53,7 @@ impl DiagnosticEntry for LoweringDiagnostic {
             LoweringDiagnosticKind::DesnappingANonCopyableType { .. } => {
                 "Cannot desnap a non copyable type.".into()
             }
-            LoweringDiagnosticKind::MatchError(
-                match_err
-             ) =>
-                match_err.format(),
+            LoweringDiagnosticKind::MatchError(match_err) => match_err.format(),
             LoweringDiagnosticKind::CannotInlineFunctionThatMightCallItself => {
                 "Cannot inline a function that might call itself.".into()
             }
@@ -70,7 +68,7 @@ impl DiagnosticEntry for LoweringDiagnostic {
             }
             LoweringDiagnosticKind::NoPanicFunctionCycle => {
                 "Call cycle of `nopanic` functions is not allowed.".into()
-            },
+            }
             LoweringDiagnosticKind::LiteralError(literal_error) => literal_error.format(db),
             LoweringDiagnosticKind::UnsupportedPattern => {
                 "Inner patterns are not in this context.".into()
@@ -80,10 +78,17 @@ impl DiagnosticEntry for LoweringDiagnostic {
                 "Fixed size array inner type must implement the `Copy` trait when the array size \
                  is greater than 1."
                     .into()
-            },
+            }
             LoweringDiagnosticKind::EmptyRepeatedElementFixedSizeArray => {
                 "Fixed size array repeated element size must be greater than 0.".into()
-            },
+            }
+        }
+    }
+
+    fn severity(&self) -> Severity {
+        match self.kind {
+            LoweringDiagnosticKind::Unreachable { .. } => Severity::Warning,
+            _ => Severity::Error,
         }
     }
 
@@ -103,6 +108,10 @@ impl DiagnosticEntry for LoweringDiagnostic {
             _ => {}
         }
         self.location.stable_location.diagnostic_location(db.upcast())
+    }
+
+    fn is_same_kind(&self, other: &Self) -> bool {
+        other.kind == self.kind
     }
 }
 

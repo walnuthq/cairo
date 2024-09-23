@@ -1,10 +1,12 @@
 use cairo_lang_defs::patcher::{PatchBuilder, RewriteNode};
 use cairo_lang_defs::plugin::{
-    InlineMacroExprPlugin, InlinePluginResult, NamedPlugin, PluginDiagnostic, PluginGeneratedFile,
+    InlineMacroExprPlugin, InlinePluginResult, MacroPluginMetadata, NamedPlugin, PluginDiagnostic,
+    PluginGeneratedFile,
 };
 use cairo_lang_defs::plugin_utils::{
     escape_node, try_extract_unnamed_arg, unsupported_bracket_diagnostic,
 };
+use cairo_lang_filesystem::cfg::Cfg;
 use cairo_lang_syntax::node::ast::WrappedArgList;
 use cairo_lang_syntax::node::db::SyntaxGroup;
 use cairo_lang_syntax::node::{ast, TypedSyntaxNode};
@@ -18,6 +20,7 @@ trait CompareAssertionPlugin: NamedPlugin {
         &self,
         db: &dyn SyntaxGroup,
         syntax: &ast::ExprInlineMacro,
+        metadata: &MacroPluginMetadata<'_>,
     ) -> InlinePluginResult {
         let WrappedArgList::ParenthesizedArgList(arguments_syntax) = syntax.arguments(db) else {
             return unsupported_bracket_diagnostic(db, syntax);
@@ -56,24 +59,28 @@ trait CompareAssertionPlugin: NamedPlugin {
         let lhs_escaped = escape_node(db, lhs.as_syntax_node());
         let rhs_escaped = escape_node(db, rhs.as_syntax_node());
         let mut builder = PatchBuilder::new(db, syntax);
-        let (lhs_value, maybe_assign_lhs) = if matches!(lhs, ast::Expr::Path(_)) {
+        // Checks if the expression is a variable, to not create an extra variable.
+        let is_var = |expr: &ast::Expr| matches!(expr, ast::Expr::Path(path) if path.elements(db).len() == 1);
+        let (lhs_value, maybe_assign_lhs) = if is_var(&lhs) {
             (RewriteNode::new_trimmed(lhs.as_syntax_node()), "")
         } else {
             (
                 RewriteNode::mapped_text(
                     &format!("__lhs_value_for_{}_macro__", Self::NAME),
-                    lhs.as_syntax_node().span_without_trivia(db),
+                    db,
+                    &lhs,
                 ),
                 "let $lhs_value$ = $lhs$;",
             )
         };
-        let (rhs_value, maybe_assign_rhs) = if matches!(rhs, ast::Expr::Path(_)) {
+        let (rhs_value, maybe_assign_rhs) = if is_var(&rhs) {
             (RewriteNode::new_trimmed(rhs.as_syntax_node()), "")
         } else {
             (
                 RewriteNode::mapped_text(
                     &format!("__rhs_value_for_{}_macro__", Self::NAME),
-                    rhs.as_syntax_node().span_without_trivia(db),
+                    db,
+                    &rhs,
                 ),
                 "let $rhs_value$ = $rhs$;",
             )
@@ -158,6 +165,15 @@ trait CompareAssertionPlugin: NamedPlugin {
             ",
         });
         let (content, code_mappings) = builder.build();
+        let mut diagnostics = vec![];
+        if !metadata.cfg_set.contains(&Cfg::kv("target", "test"))
+            && !metadata.cfg_set.contains(&Cfg::name("test"))
+        {
+            diagnostics.push(PluginDiagnostic::error(
+                syntax,
+                format!("`{}` macro is only available in test mode.", Self::NAME),
+            ));
+        }
         InlinePluginResult {
             code: Some(PluginGeneratedFile {
                 name: format!("{}_macro", Self::NAME).into(),
@@ -165,7 +181,7 @@ trait CompareAssertionPlugin: NamedPlugin {
                 code_mappings,
                 aux_data: None,
             }),
-            diagnostics: vec![],
+            diagnostics,
         }
     }
 }
@@ -188,8 +204,9 @@ macro_rules! define_compare_assert_macro {
                 &self,
                 db: &dyn SyntaxGroup,
                 syntax: &ast::ExprInlineMacro,
+                metadata: &MacroPluginMetadata<'_>,
             ) -> InlinePluginResult {
-                CompareAssertionPlugin::generate_code(self, db, syntax)
+                CompareAssertionPlugin::generate_code(self, db, syntax, metadata)
             }
         }
     };

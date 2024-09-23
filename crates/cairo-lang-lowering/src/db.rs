@@ -6,16 +6,14 @@ use cairo_lang_diagnostics::{Diagnostics, DiagnosticsBuilder, Maybe};
 use cairo_lang_filesystem::ids::FileId;
 use cairo_lang_semantic::db::SemanticGroup;
 use cairo_lang_semantic::items::enm::SemanticEnumEx;
-use cairo_lang_semantic::items::structure::SemanticStructEx;
 use cairo_lang_semantic::{self as semantic, corelib, ConcreteTypeId, TypeId, TypeLongId};
 use cairo_lang_utils::ordered_hash_set::OrderedHashSet;
 use cairo_lang_utils::unordered_hash_map::UnorderedHashMap;
 use cairo_lang_utils::unordered_hash_set::UnorderedHashSet;
-use cairo_lang_utils::{extract_matches, Intern, LookupIntern, Upcast};
+use cairo_lang_utils::{Intern, LookupIntern, Upcast};
 use defs::ids::NamedLanguageElementId;
 use itertools::Itertools;
 use num_traits::ToPrimitive;
-use semantic::items::constant::ConstValue;
 
 use crate::add_withdraw_gas::add_withdraw_gas;
 use crate::borrow_check::{borrow_check, PotentialDestructCalls};
@@ -30,6 +28,7 @@ use crate::optimizations::config::OptimizationConfig;
 use crate::optimizations::scrub_units::scrub_units;
 use crate::optimizations::strategy::{OptimizationStrategy, OptimizationStrategyId};
 use crate::panic::lower_panics;
+use crate::utils::InliningStrategy;
 use crate::{
     ids, BlockId, DependencyType, FlatBlockEnd, FlatLowered, Location, MatchInfo, Statement,
 };
@@ -143,6 +142,14 @@ pub trait LoweringGroup: SemanticGroup + Upcast<dyn SemanticGroup> {
         dependency_type: DependencyType,
     ) -> Maybe<Vec<ids::ConcreteFunctionWithBodyId>>;
 
+    /// Returns the set of direct callees which are functions with body of a concrete function with
+    /// a body (i.e. excluding libfunc callees), after all optimization phases.
+    fn final_concrete_function_with_body_lowered_direct_callees(
+        &self,
+        function_id: ids::ConcreteFunctionWithBodyId,
+        dependency_type: DependencyType,
+    ) -> Maybe<Vec<ids::ConcreteFunctionWithBodyId>>;
+
     /// Aggregates function level lowering diagnostics.
     fn function_with_body_lowering_diagnostics(
         &self,
@@ -210,15 +217,15 @@ pub trait LoweringGroup: SemanticGroup + Upcast<dyn SemanticGroup> {
         dependency_type: DependencyType,
     ) -> Maybe<OrderedHashSet<ids::FunctionWithBodyId>>;
 
-    /// Returns `true` if the function calls (possibly indirectly) itself, or if it calls (possibly
-    /// indirectly) such a function. For example, if f0 calls f1, f1 calls f2, f2 calls f3, and f3
-    /// calls f2, then [Self::contains_cycle] will return `true` for all of these functions.
-    #[salsa::invoke(crate::graph_algorithms::cycles::contains_cycle)]
-    #[salsa::cycle(crate::graph_algorithms::cycles::contains_cycle_handle_cycle)]
-    fn contains_cycle(
+    /// Returns `true` if the function (in its final lowering representation) calls (possibly
+    /// indirectly) itself, or if it calls (possibly indirectly) such a function. For example, if f0
+    /// calls f1, f1 calls f2, f2 calls f3, and f3 calls f2, then [Self::final_contains_call_cycle]
+    /// will return `true` for all of these functions.
+    #[salsa::invoke(crate::graph_algorithms::cycles::final_contains_call_cycle)]
+    #[salsa::cycle(crate::graph_algorithms::cycles::final_contains_call_cycle_handle_cycle)]
+    fn final_contains_call_cycle(
         &self,
         function_id: ids::ConcreteFunctionWithBodyId,
-        dependency_type: DependencyType,
     ) -> Maybe<bool>;
 
     /// Returns `true` if the function calls (possibly indirectly) itself. For example, if f0 calls
@@ -313,6 +320,12 @@ pub trait LoweringGroup: SemanticGroup + Upcast<dyn SemanticGroup> {
     #[salsa::invoke(crate::optimizations::config::priv_movable_function_ids)]
     fn priv_movable_function_ids(&self) -> Arc<UnorderedHashSet<ids::FunctionId>>;
 
+    /// Internal query for the libfuncs information required for const folding.
+    #[salsa::invoke(crate::optimizations::const_folding::priv_const_folding_info)]
+    fn priv_const_folding_info(
+        &self,
+    ) -> Arc<crate::optimizations::const_folding::ConstFoldingLibfuncInfo>;
+
     // Internal query for a heuristic to decide if a given `function_id` should be inlined.
     #[salsa::invoke(crate::inline::priv_should_inline)]
     fn priv_should_inline(&self, function_id: ids::ConcreteFunctionWithBodyId) -> Maybe<bool>;
@@ -335,7 +348,10 @@ pub trait LoweringGroup: SemanticGroup + Upcast<dyn SemanticGroup> {
     fn type_size(&self, ty: TypeId) -> usize;
 }
 
-pub fn init_lowering_group(db: &mut (dyn LoweringGroup + 'static)) {
+pub fn init_lowering_group(
+    db: &mut (dyn LoweringGroup + 'static),
+    inlining_strategy: InliningStrategy,
+) {
     let mut moveable_functions: Vec<String> =
         ["bool_not_impl", "felt252_add", "felt252_sub", "felt252_mul", "felt252_div"]
             .into_iter()
@@ -347,7 +363,9 @@ pub fn init_lowering_group(db: &mut (dyn LoweringGroup + 'static)) {
     }
 
     db.set_optimization_config(Arc::new(
-        OptimizationConfig::default().with_moveable_functions(moveable_functions),
+        OptimizationConfig::default()
+            .with_moveable_functions(moveable_functions)
+            .with_inlining_strategy(inlining_strategy),
     ));
 }
 
@@ -376,8 +394,8 @@ fn priv_function_with_body_lowering(
     let multi_lowering = db.priv_function_with_body_multi_lowering(semantic_function_id)?;
     let lowered = match &function_id.lookup_intern(db) {
         ids::FunctionWithBodyLongId::Semantic(_) => multi_lowering.main_lowering.clone(),
-        ids::FunctionWithBodyLongId::Generated { element, .. } => {
-            multi_lowering.generated_lowerings[element].clone()
+        ids::FunctionWithBodyLongId::Generated { key, .. } => {
+            multi_lowering.generated_lowerings[key].clone()
         }
     };
     Ok(Arc::new(lowered))
@@ -388,7 +406,8 @@ fn function_with_body_lowering_with_borrow_check(
     function_id: ids::FunctionWithBodyId,
 ) -> Maybe<(Arc<FlatLowered>, Arc<PotentialDestructCalls>)> {
     let mut lowered = (*db.priv_function_with_body_lowering(function_id)?).clone();
-    let block_extra_calls = borrow_check(db, &mut lowered);
+    let block_extra_calls =
+        borrow_check(db, function_id.to_concrete(db)?.is_panic_destruct_fn(db)?, &mut lowered);
     Ok((Arc::new(lowered), Arc::new(block_extra_calls)))
 }
 
@@ -629,6 +648,19 @@ fn concrete_function_with_body_postpanic_direct_callees_with_body(
     )
 }
 
+fn final_concrete_function_with_body_lowered_direct_callees(
+    db: &dyn LoweringGroup,
+    function_id: ids::ConcreteFunctionWithBodyId,
+    dependency_type: DependencyType,
+) -> Maybe<Vec<ids::ConcreteFunctionWithBodyId>> {
+    let lowered_function = db.final_concrete_function_with_body_lowered(function_id)?;
+    functions_with_body_from_function_ids(
+        db,
+        get_direct_callees(db, &lowered_function, dependency_type, &Default::default()),
+        dependency_type,
+    )
+}
+
 fn function_with_body_lowering_diagnostics(
     db: &dyn LoweringGroup,
     function_id: ids::FunctionWithBodyId,
@@ -667,12 +699,10 @@ fn semantic_function_with_body_lowering_diagnostics(
         let function_id = ids::FunctionWithBodyLongId::Semantic(semantic_function_id).intern(db);
         diagnostics
             .extend(db.function_with_body_lowering_diagnostics(function_id).unwrap_or_default());
-        for (element, _) in multi_lowering.generated_lowerings.iter() {
-            let function_id = ids::FunctionWithBodyLongId::Generated {
-                parent: semantic_function_id,
-                element: *element,
-            }
-            .intern(db);
+        for (key, _) in multi_lowering.generated_lowerings.iter() {
+            let function_id =
+                ids::FunctionWithBodyLongId::Generated { parent: semantic_function_id, key: *key }
+                    .intern(db);
             diagnostics.extend(
                 db.function_with_body_lowering_diagnostics(function_id).unwrap_or_default(),
             );
@@ -735,7 +765,7 @@ fn type_size(db: &dyn LoweringGroup, ty: TypeId) -> usize {
             ConcreteTypeId::Struct(struct_id) => db
                 .concrete_struct_members(struct_id)
                 .unwrap()
-                .into_iter()
+                .iter()
                 .map(|(_, member)| db.type_size(member.ty))
                 .sum::<usize>(),
             ConcreteTypeId::Enum(enum_id) => {
@@ -760,8 +790,14 @@ fn type_size(db: &dyn LoweringGroup, ty: TypeId) -> usize {
         TypeLongId::Snapshot(ty) => db.type_size(ty),
         TypeLongId::FixedSizeArray { type_id, size } => {
             db.type_size(type_id)
-                * extract_matches!(size.lookup_intern(db), ConstValue::Int).to_usize().unwrap()
+                * size
+                    .lookup_intern(db)
+                    .into_int()
+                    .expect("Expected ConstValue::Int for size")
+                    .to_usize()
+                    .unwrap()
         }
+        TypeLongId::Closure(_) => unimplemented!(),
         TypeLongId::Coupon(_) => 0,
         TypeLongId::GenericParameter(_)
         | TypeLongId::Var(_)

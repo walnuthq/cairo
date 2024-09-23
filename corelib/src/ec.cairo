@@ -1,9 +1,12 @@
 //! This module contains functions and constructs related to elliptic curve operations on the Stark
 //! curve.
 
-use core::array::ArrayTrait;
-use core::traits::{Into, TryInto};
-use core::zeroable::IsZeroResult;
+#[allow(unused_imports)]
+use crate::array::ArrayTrait;
+#[allow(unused_imports)]
+use crate::traits::{Into, TryInto};
+use crate::zeroable::IsZeroResult;
+use crate::RangeCheck;
 
 pub mod stark_curve {
     /// The STARK Curve is defined by the equation `y^2 = x^3 + ALPHA*x + BETA`.
@@ -193,7 +196,8 @@ impl EcPointAdd of Add<EcPoint> {
     }
 }
 
-impl EcPointAddEq of AddEq<EcPoint> {
+#[feature("deprecated-op-assign-traits")]
+impl EcPointAddEq of crate::traits::AddEq<EcPoint> {
     #[inline(always)]
     fn add_eq(ref self: EcPoint, other: EcPoint) {
         self = Add::add(self, other);
@@ -213,7 +217,8 @@ impl EcPointSub of Sub<EcPoint> {
     }
 }
 
-impl EcPointSubEq of SubEq<EcPoint> {
+#[feature("deprecated-op-assign-traits")]
+impl EcPointSubEq of crate::traits::SubEq<EcPoint> {
     #[inline(always)]
     fn sub_eq(ref self: EcPoint, other: EcPoint) {
         self = Sub::sub(self, other);

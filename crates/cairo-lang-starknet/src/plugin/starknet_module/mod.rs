@@ -6,6 +6,7 @@ use cairo_lang_defs::plugin::{
     DynGeneratedFileAuxData, MacroPluginMetadata, PluginDiagnostic, PluginGeneratedFile,
     PluginResult,
 };
+use cairo_lang_filesystem::db::Edition;
 use cairo_lang_plugins::plugins::HasItemsInCfgEx;
 use cairo_lang_syntax::node::ast::MaybeModuleBody;
 use cairo_lang_syntax::node::db::SyntaxGroup;
@@ -90,9 +91,13 @@ impl StarknetModuleKind {
     pub fn get_full_state_struct_name(self) -> String {
         format!("{}{}", self.get_state_struct_name(), self.get_generic_arg_str())
     }
-    /// Gets the member State struct name, according to the module kind.
-    pub fn get_member_state_name(self) -> String {
-        format!("{}MemberState", self.to_str_capital())
+    /// Gets the storage base struct name, according to the module kind.
+    pub fn get_storage_base_struct_name(self) -> String {
+        format!("{}StorageBase", self.to_str_capital())
+    }
+    /// Gets the mutable storage base struct name, according to the module kind.
+    pub fn get_storage_base_mut_struct_name(self) -> String {
+        format!("{}StorageBaseMut", self.to_str_capital())
     }
 }
 
@@ -238,7 +243,7 @@ pub(super) fn handle_module_by_storage(
             },
         }),
         diagnostics,
-        remove_original_item: true,
+        remove_original_item: backwards_compatible_storage(metadata.edition),
     })
 }
 
@@ -273,7 +278,8 @@ fn maybe_add_extra_use(
         | ast::ModuleItem::FreeFunction(_)
         | ast::ModuleItem::ImplAlias(_)
         | ast::ModuleItem::Missing(_)
-        | ast::ModuleItem::InlineMacro(_) => None,
+        | ast::ModuleItem::InlineMacro(_)
+        | ast::ModuleItem::HeaderDoc(_) => None,
     } {
         extra_uses.entry(ident.text(db)).or_insert_with_key(|ident| format!("super::{}", ident));
     }
@@ -292,4 +298,14 @@ fn grand_grand_parent_starknet_module(
     let module_ast = ast::ItemModule::from_syntax_node(db, module_node);
     let (module_kind, attr) = StarknetModuleKind::from_module(db, &module_ast)?;
     Some((module_ast, module_kind, attr))
+}
+
+/// Whether the generated code should be backwards compatible with the old storage generated code.
+/// This mostly affect the visibility of the generated storage structs, as everything was public in
+/// the old version regardless of the original visibility.
+pub fn backwards_compatible_storage(edition: Edition) -> bool {
+    match edition {
+        Edition::V2023_01 | Edition::V2023_10 | Edition::V2023_11 => true,
+        Edition::V2024_07 => false,
+    }
 }

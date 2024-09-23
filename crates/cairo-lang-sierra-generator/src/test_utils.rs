@@ -1,15 +1,16 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
-use cairo_lang_defs::db::{DefsDatabase, DefsGroup};
+use cairo_lang_defs::db::{ext_as_virtual_impl, DefsDatabase, DefsGroup};
 use cairo_lang_defs::ids::ModuleId;
 use cairo_lang_filesystem::db::{
-    init_dev_corelib, init_files_group, AsFilesGroupMut, FilesDatabase, FilesGroup, FilesGroupEx,
+    init_dev_corelib, init_files_group, AsFilesGroupMut, ExternalFiles, FilesDatabase, FilesGroup,
+    FilesGroupEx,
 };
 use cairo_lang_filesystem::detect::detect_corelib;
 use cairo_lang_filesystem::flag::Flag;
-use cairo_lang_filesystem::ids::FlagId;
+use cairo_lang_filesystem::ids::{FlagId, VirtualFile};
 use cairo_lang_lowering::db::{LoweringDatabase, LoweringGroup};
-use cairo_lang_parser::db::ParserDatabase;
+use cairo_lang_parser::db::{ParserDatabase, ParserGroup};
 use cairo_lang_semantic::db::{SemanticDatabase, SemanticGroup};
 use cairo_lang_semantic::test_utils::setup_test_crate;
 use cairo_lang_sierra::ids::{ConcreteLibfuncId, GenericLibfuncId};
@@ -19,7 +20,6 @@ use cairo_lang_utils::{Intern, Upcast, UpcastMut};
 use defs::ids::FreeFunctionId;
 use lowering::ids::ConcreteFunctionWithBodyLongId;
 use lowering::optimizations::config::OptimizationConfig;
-use once_cell::sync::Lazy;
 use semantic::inline_macros::get_default_plugin_suite;
 use {cairo_lang_defs as defs, cairo_lang_lowering as lowering, cairo_lang_semantic as semantic};
 
@@ -42,15 +42,20 @@ pub struct SierraGenDatabaseForTesting {
     storage: salsa::Storage<SierraGenDatabaseForTesting>,
 }
 impl salsa::Database for SierraGenDatabaseForTesting {}
+impl ExternalFiles for SierraGenDatabaseForTesting {
+    fn ext_as_virtual(&self, external_id: salsa::InternId) -> VirtualFile {
+        ext_as_virtual_impl(self.upcast(), external_id)
+    }
+}
 impl salsa::ParallelDatabase for SierraGenDatabaseForTesting {
     fn snapshot(&self) -> salsa::Snapshot<SierraGenDatabaseForTesting> {
         salsa::Snapshot::new(SierraGenDatabaseForTesting { storage: self.storage.snapshot() })
     }
 }
-pub static SHARED_DB: Lazy<Mutex<SierraGenDatabaseForTesting>> =
-    Lazy::new(|| Mutex::new(SierraGenDatabaseForTesting::new_empty()));
-pub static SHARED_DB_WITHOUT_AD_WITHDRAW_GAS: Lazy<Mutex<SierraGenDatabaseForTesting>> =
-    Lazy::new(|| {
+pub static SHARED_DB: LazyLock<Mutex<SierraGenDatabaseForTesting>> =
+    LazyLock::new(|| Mutex::new(SierraGenDatabaseForTesting::new_empty()));
+pub static SHARED_DB_WITHOUT_AD_WITHDRAW_GAS: LazyLock<Mutex<SierraGenDatabaseForTesting>> =
+    LazyLock::new(|| {
         let mut db = SierraGenDatabaseForTesting::new_empty();
         let add_withdraw_gas_flag_id = FlagId::new(db.upcast_mut(), "add_withdraw_gas");
         db.set_flag(add_withdraw_gas_flag_id, Some(Arc::new(Flag::AddWithdrawGas(false))));
@@ -107,17 +112,22 @@ impl Upcast<dyn SyntaxGroup> for SierraGenDatabaseForTesting {
     }
 }
 impl Upcast<dyn DefsGroup> for SierraGenDatabaseForTesting {
-    fn upcast(&self) -> &(dyn defs::db::DefsGroup + 'static) {
+    fn upcast(&self) -> &(dyn DefsGroup + 'static) {
         self
     }
 }
 impl Upcast<dyn SemanticGroup> for SierraGenDatabaseForTesting {
-    fn upcast(&self) -> &(dyn semantic::db::SemanticGroup + 'static) {
+    fn upcast(&self) -> &(dyn SemanticGroup + 'static) {
         self
     }
 }
 impl Upcast<dyn LoweringGroup> for SierraGenDatabaseForTesting {
-    fn upcast(&self) -> &(dyn lowering::db::LoweringGroup + 'static) {
+    fn upcast(&self) -> &(dyn LoweringGroup + 'static) {
+        self
+    }
+}
+impl Upcast<dyn ParserGroup> for SierraGenDatabaseForTesting {
+    fn upcast(&self) -> &(dyn ParserGroup + 'static) {
         self
     }
 }

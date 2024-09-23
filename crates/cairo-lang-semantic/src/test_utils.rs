@@ -1,25 +1,24 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{LazyLock, Mutex};
 
-use cairo_lang_defs::db::{DefsDatabase, DefsGroup};
+use cairo_lang_defs::db::{ext_as_virtual_impl, DefsDatabase, DefsGroup};
 use cairo_lang_defs::ids::{FunctionWithBodyId, ModuleId, SubmoduleId, SubmoduleLongId};
 use cairo_lang_diagnostics::{Diagnostics, DiagnosticsBuilder};
 use cairo_lang_filesystem::db::{
     init_dev_corelib, init_files_group, AsFilesGroupMut, CrateConfiguration, CrateSettings,
-    Edition, ExperimentalFeaturesConfig, FilesDatabase, FilesGroup,
+    Edition, ExperimentalFeaturesConfig, ExternalFiles, FilesDatabase, FilesGroup,
 };
 use cairo_lang_filesystem::detect::detect_corelib;
 use cairo_lang_filesystem::ids::{
     CrateId, CrateLongId, Directory, FileKind, FileLongId, VirtualFile,
 };
-use cairo_lang_parser::db::ParserDatabase;
+use cairo_lang_parser::db::{ParserDatabase, ParserGroup};
 use cairo_lang_syntax::node::db::{SyntaxDatabase, SyntaxGroup};
 use cairo_lang_syntax::node::{ast, TypedStablePtr};
 use cairo_lang_test_utils::parse_test_file::TestRunnerResult;
 use cairo_lang_test_utils::verify_diagnostics_expectation;
 use cairo_lang_utils::ordered_hash_map::OrderedHashMap;
 use cairo_lang_utils::{extract_matches, Intern, LookupIntern, OptionFrom, Upcast};
-use once_cell::sync::Lazy;
 
 use crate::db::{SemanticDatabase, SemanticGroup};
 use crate::inline_macros::get_default_plugin_suite;
@@ -31,6 +30,11 @@ pub struct SemanticDatabaseForTesting {
     storage: salsa::Storage<SemanticDatabaseForTesting>,
 }
 impl salsa::Database for SemanticDatabaseForTesting {}
+impl ExternalFiles for SemanticDatabaseForTesting {
+    fn ext_as_virtual(&self, external_id: salsa::InternId) -> VirtualFile {
+        ext_as_virtual_impl(self.upcast(), external_id)
+    }
+}
 impl salsa::ParallelDatabase for SemanticDatabaseForTesting {
     fn snapshot(&self) -> salsa::Snapshot<SemanticDatabaseForTesting> {
         salsa::Snapshot::new(SemanticDatabaseForTesting { storage: self.storage.snapshot() })
@@ -53,8 +57,8 @@ impl SemanticDatabaseForTesting {
         SemanticDatabaseForTesting { storage: self.storage.snapshot() }
     }
 }
-pub static SHARED_DB: Lazy<Mutex<SemanticDatabaseForTesting>> =
-    Lazy::new(|| Mutex::new(SemanticDatabaseForTesting::new_empty()));
+pub static SHARED_DB: LazyLock<Mutex<SemanticDatabaseForTesting>> =
+    LazyLock::new(|| Mutex::new(SemanticDatabaseForTesting::new_empty()));
 impl Default for SemanticDatabaseForTesting {
     fn default() -> Self {
         SHARED_DB.lock().unwrap().snapshot()
@@ -82,6 +86,11 @@ impl Upcast<dyn DefsGroup> for SemanticDatabaseForTesting {
 }
 impl Upcast<dyn SemanticGroup> for SemanticDatabaseForTesting {
     fn upcast(&self) -> &(dyn SemanticGroup + 'static) {
+        self
+    }
+}
+impl Upcast<dyn ParserGroup> for SemanticDatabaseForTesting {
+    fn upcast(&self) -> &(dyn ParserGroup + 'static) {
         self
     }
 }
@@ -123,8 +132,8 @@ pub fn setup_test_crate_ex(
     let file_id = FileLongId::Virtual(VirtualFile {
         parent: None,
         name: "lib.cairo".into(),
-        content: Arc::new(content.into()),
-        code_mappings: Default::default(),
+        content: content.into(),
+        code_mappings: [].into(),
         kind: FileKind::Module,
     })
     .intern(db);
@@ -134,6 +143,7 @@ pub fn setup_test_crate_ex(
     } else {
         CrateSettings {
             edition: Edition::default(),
+            version: None,
             experimental_features: ExperimentalFeaturesConfig {
                 negative_impls: true,
                 coupons: true,

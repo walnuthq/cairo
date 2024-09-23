@@ -330,6 +330,7 @@ impl QueryAttrs for ModuleItem {
             ModuleItem::TypeAlias(item) => item.attributes_elements(db),
             ModuleItem::InlineMacro(item) => item.attributes_elements(db),
             ModuleItem::Missing(_) => vec![],
+            ModuleItem::HeaderDoc(_) => vec![],
         }
     }
 }
@@ -484,6 +485,7 @@ impl QueryAttrs for Statement {
             Statement::Return(statement) => statement.attributes_elements(db),
             Statement::Let(statement) => statement.attributes_elements(db),
             Statement::Expr(statement) => statement.attributes_elements(db),
+            Statement::Item(statement) => statement.item(db).attributes_elements(db),
             Statement::Missing(_) => vec![],
         }
     }
@@ -594,5 +596,27 @@ impl BodyItems for ast::ImplBody {
     type Item = ImplItem;
     fn items_vec(&self, db: &dyn SyntaxGroup) -> Vec<ImplItem> {
         self.items(db).elements(db)
+    }
+}
+
+/// Helper trait for ast::UsePath.
+pub trait UsePathEx {
+    /// Retrieves the item of a use path.
+    fn get_item(&self, db: &dyn SyntaxGroup) -> ast::ItemUse;
+}
+impl UsePathEx for ast::UsePath {
+    fn get_item(&self, db: &dyn SyntaxGroup) -> ast::ItemUse {
+        let mut node = self.as_syntax_node();
+        loop {
+            let Some(parent) = node.parent() else {
+                unreachable!("UsePath is not under an ItemUse.");
+            };
+            match parent.kind(db) {
+                SyntaxKind::ItemUse => {
+                    break ast::ItemUse::from_syntax_node(db, parent);
+                }
+                _ => node = parent,
+            }
+        }
     }
 }

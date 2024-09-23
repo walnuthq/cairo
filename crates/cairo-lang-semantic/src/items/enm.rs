@@ -5,7 +5,6 @@ use cairo_lang_defs::ids::{
 };
 use cairo_lang_diagnostics::{Diagnostics, Maybe, ToMaybe};
 use cairo_lang_proc_macros::{DebugWithDb, SemanticObject};
-use cairo_lang_syntax::attribute::consts::PHANTOM_ATTR;
 use cairo_lang_syntax::attribute::structured::{Attribute, AttributeListStructurize};
 use cairo_lang_syntax::node::{ast, Terminal, TypedStablePtr, TypedSyntaxNode};
 use cairo_lang_utils::ordered_hash_map::OrderedHashMap;
@@ -108,13 +107,14 @@ pub fn enum_generic_params_data(
     let inference_id =
         InferenceId::LookupItemGenerics(LookupItemId::ModuleItem(ModuleItemId::Enum(enum_id)));
     let mut resolver = Resolver::new(db, module_file_id, inference_id);
+    resolver.set_feature_config(&enum_id, &enum_ast, &mut diagnostics);
     let generic_params = semantic_generic_params(
         db,
         &mut diagnostics,
         &mut resolver,
         module_file_id,
         &enum_ast.generic_params(db.upcast()),
-    )?;
+    );
     let inference = &mut resolver.inference();
     inference.finalize(&mut diagnostics, enum_ast.stable_ptr().untyped());
 
@@ -250,7 +250,11 @@ pub fn enum_definition_diagnostics(
     };
     // If the enum is a phantom type, no need to check if its variants are fully valid types, as
     // they won't be used.
-    if enum_id.has_attr(db, PHANTOM_ATTR).unwrap_or_default() {
+    if db
+        .declared_phantom_type_attributes()
+        .iter()
+        .any(|attr| enum_id.has_attr(db, attr).unwrap_or_default())
+    {
         return data.diagnostics;
     }
     let mut diagnostics = SemanticDiagnostics::from(data.diagnostics);

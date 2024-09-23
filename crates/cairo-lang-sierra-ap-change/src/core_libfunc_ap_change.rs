@@ -71,12 +71,17 @@ pub fn core_libfunc_ap_change<InfoProvider: InvocationApChangeInfoProvider>(
         Array(libfunc) => match libfunc {
             ArrayConcreteLibfunc::New(_) => vec![ApChange::Known(1)],
             ArrayConcreteLibfunc::SpanFromTuple(_) => vec![ApChange::Known(0)],
+            ArrayConcreteLibfunc::TupleFromSpan(_) => vec![ApChange::Known(2), ApChange::Known(2)],
             ArrayConcreteLibfunc::Append(_) => vec![ApChange::Known(0)],
             ArrayConcreteLibfunc::PopFront(_)
             | ArrayConcreteLibfunc::PopFrontConsume(_)
             | ArrayConcreteLibfunc::SnapshotPopFront(_)
             | ArrayConcreteLibfunc::SnapshotPopBack(_) => {
                 vec![ApChange::Known(1), ApChange::Known(1)]
+            }
+            ArrayConcreteLibfunc::SnapshotMultiPopFront(_)
+            | ArrayConcreteLibfunc::SnapshotMultiPopBack(_) => {
+                vec![ApChange::Known(3), ApChange::Known(3)]
             }
             ArrayConcreteLibfunc::Get(libfunc) => {
                 if info_provider.type_size(&libfunc.ty) == 1 { [4, 3] } else { [5, 4] }
@@ -367,21 +372,45 @@ pub fn core_libfunc_ap_change<InfoProvider: InvocationApChangeInfoProvider>(
             | BoundedIntConcreteLibfunc::Mul(_) => vec![ApChange::Known(0)],
             BoundedIntConcreteLibfunc::DivRem(libfunc) => {
                 vec![ApChange::Known(
-                    match BoundedIntDivRemAlgorithm::new(&libfunc.lhs, &libfunc.rhs).unwrap() {
+                    match BoundedIntDivRemAlgorithm::try_new(&libfunc.lhs, &libfunc.rhs).unwrap() {
                         BoundedIntDivRemAlgorithm::KnownSmallRhs => 5,
-                        BoundedIntDivRemAlgorithm::KnownSmallQuotient(_) => 6,
-                        BoundedIntDivRemAlgorithm::KnownSmallLhs(_) => 7,
+                        BoundedIntDivRemAlgorithm::KnownSmallQuotient { .. } => 6,
+                        BoundedIntDivRemAlgorithm::KnownSmallLhs { .. } => 7,
                     },
                 )]
             }
             BoundedIntConcreteLibfunc::Constrain(libfunc) => {
                 vec![
-                    ApChange::Known(1 + usize::from(libfunc.boundary != BigInt::one().shl(128))),
-                    ApChange::Known(1 + usize::from(!libfunc.boundary.is_zero())),
+                    ApChange::Known(
+                        1 + if libfunc.boundary == BigInt::one().shl(128) { 0 } else { 1 },
+                    ),
+                    ApChange::Known(1 + if libfunc.boundary.is_zero() { 0 } else { 1 }),
                 ]
             }
+            BoundedIntConcreteLibfunc::IsZero(_) => vec![ApChange::Known(0), ApChange::Known(0)],
+            BoundedIntConcreteLibfunc::WrapNonZero(_) => {
+                vec![ApChange::Known(0)]
+            }
         },
+        Circuit(CircuitConcreteLibfunc::TryIntoCircuitModulus(_)) => {
+            vec![ApChange::Known(1), ApChange::Known(1)]
+        }
+        Circuit(CircuitConcreteLibfunc::AddInput(_)) => {
+            vec![ApChange::Known(2), ApChange::Known(2)]
+        }
+        Circuit(CircuitConcreteLibfunc::Eval(_)) => vec![ApChange::Known(4), ApChange::Known(4)],
+        Circuit(CircuitConcreteLibfunc::GetDescriptor(_)) => vec![ApChange::Known(6)],
+        Circuit(CircuitConcreteLibfunc::GetOutput(_)) => vec![ApChange::Known(5)],
         Circuit(CircuitConcreteLibfunc::InitCircuitData(_)) => vec![ApChange::Known(0)],
+        Circuit(CircuitConcreteLibfunc::FailureGuaranteeVerify(_)) => vec![ApChange::Known(12)],
+        Circuit(CircuitConcreteLibfunc::IntoU96Guarantee(_)) => vec![ApChange::Known(0)],
+        Circuit(CircuitConcreteLibfunc::U96GuaranteeVerify(_)) => vec![ApChange::Known(0)],
+        Circuit(CircuitConcreteLibfunc::U96LimbsLessThanGuaranteeVerify(_)) => {
+            vec![ApChange::Known(1), ApChange::Known(1)]
+        }
+        Circuit(CircuitConcreteLibfunc::U96SingleLimbLessThanGuaranteeVerify(_)) => {
+            vec![ApChange::Known(0)]
+        }
     }
 }
 

@@ -6,6 +6,7 @@ use cairo_lang_diagnostics::{DiagnosticAdded, Maybe};
 use cairo_lang_semantic::expr::fmt::ExprFormatter;
 use cairo_lang_semantic::items::enm::SemanticEnumEx;
 use cairo_lang_semantic::items::imp::ImplLookupContext;
+use cairo_lang_semantic::usage::Usages;
 use cairo_lang_syntax::node::ids::SyntaxStablePtrId;
 use cairo_lang_utils::ordered_hash_map::OrderedHashMap;
 use cairo_lang_utils::unordered_hash_map::UnorderedHashMap;
@@ -13,21 +14,20 @@ use cairo_lang_utils::Intern;
 use defs::diagnostic_utils::StableLocation;
 use id_arena::Arena;
 use itertools::{zip_eq, Itertools};
-use semantic::corelib::{core_module, get_ty_by_name, get_usize_ty};
+use semantic::corelib::{core_module, get_ty_by_name};
 use semantic::expr::inference::InferenceError;
-use semantic::items::constant::value_as_const_value;
 use semantic::types::wrap_in_snapshots;
 use semantic::{ExprVarMemberPath, MatchArmSelector, TypeLongId};
 use {cairo_lang_defs as defs, cairo_lang_semantic as semantic};
 
 use super::block_builder::{BlockBuilder, SealedBlockBuilder};
 use super::generators;
-use super::usage::BlockUsages;
 use crate::blocks::FlatBlocksBuilder;
 use crate::db::LoweringGroup;
 use crate::diagnostic::LoweringDiagnostics;
 use crate::ids::{
-    ConcreteFunctionWithBodyId, FunctionWithBodyId, LocationId, SemanticFunctionIdEx, Signature,
+    ConcreteFunctionWithBodyId, FunctionWithBodyId, GeneratedFunctionKey, LocationId,
+    SemanticFunctionIdEx, Signature,
 };
 use crate::lower::external::{extern_facade_expr, extern_facade_return_tys};
 use crate::objects::Variable;
@@ -113,9 +113,9 @@ pub struct EncapsulatingLoweringContext<'db> {
     /// Expression formatter of the free function.
     pub expr_formatter: ExprFormatter<'db>,
     /// Block usages for the entire encapsulating function.
-    pub block_usages: BlockUsages,
+    pub usages: Usages,
     /// Lowerings of generated functions.
-    pub lowerings: OrderedHashMap<semantic::ExprId, FlatLowered>,
+    pub lowerings: OrderedHashMap<GeneratedFunctionKey, FlatLowered>,
 }
 impl<'db> EncapsulatingLoweringContext<'db> {
     pub fn new(
@@ -123,14 +123,14 @@ impl<'db> EncapsulatingLoweringContext<'db> {
         semantic_function_id: defs::ids::FunctionWithBodyId,
     ) -> Maybe<Self> {
         let function_body = db.function_body(semantic_function_id)?;
-        let block_usages = BlockUsages::from_function_body(&function_body);
+        let usages = Usages::from_function_body(&function_body);
         Ok(Self {
             db,
             semantic_function_id,
             function_body,
             semantic_defs: Default::default(),
             expr_formatter: ExprFormatter { db: db.upcast(), function_id: semantic_function_id },
-            block_usages,
+            usages,
             lowerings: Default::default(),
         })
     }
@@ -300,17 +300,7 @@ impl LoweredExpr {
             LoweredExpr::Snapshot { expr, .. } => {
                 wrap_in_snapshots(ctx.db.upcast(), expr.ty(ctx), 1)
             }
-            LoweredExpr::FixedSizeArray { exprs, .. } => semantic::TypeLongId::FixedSizeArray {
-                type_id: exprs[0].ty(ctx),
-                size: value_as_const_value(
-                    ctx.db.upcast(),
-                    get_usize_ty(ctx.db.upcast()),
-                    &exprs.len().into(),
-                )
-                .unwrap()
-                .intern(ctx.db),
-            }
-            .intern(ctx.db),
+            LoweredExpr::FixedSizeArray { ty, .. } => *ty,
         }
     }
     pub fn location(&self) -> LocationId {

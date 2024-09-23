@@ -1,11 +1,12 @@
 use cairo_lang_debug::DebugWithDb;
+use cairo_lang_defs::diagnostic_utils::StableLocation;
 use cairo_lang_defs::ids::{
-    EnumId, ExternTypeId, GenericParamId, GenericTypeId, ImplDefId, ImplTypeDefId, ModuleFileId,
-    NamedLanguageElementId, StructId, TraitTypeId,
+    EnumId, ExternTypeId, GenericParamId, GenericTypeId, ModuleFileId, NamedLanguageElementId,
+    StructId, TraitTypeId,
 };
 use cairo_lang_diagnostics::{DiagnosticAdded, Maybe};
 use cairo_lang_proc_macros::SemanticObject;
-use cairo_lang_syntax::attribute::consts::{MUST_USE_ATTR, PHANTOM_ATTR};
+use cairo_lang_syntax::attribute::consts::MUST_USE_ATTR;
 use cairo_lang_syntax::node::ids::SyntaxStablePtrId;
 use cairo_lang_syntax::node::{ast, TypedStablePtr, TypedSyntaxNode};
 use cairo_lang_utils::{define_short_id, try_extract_matches, Intern, LookupIntern, OptionFrom};
@@ -21,9 +22,11 @@ use crate::corelib::{
 use crate::db::SemanticGroup;
 use crate::diagnostic::SemanticDiagnosticKind::*;
 use crate::diagnostic::{NotFoundItemType, SemanticDiagnostics, SemanticDiagnosticsBuilder};
-use crate::expr::compute::{compute_expr_semantic, ComputationContext, Environment};
+use crate::expr::compute::{
+    compute_expr_semantic, ComputationContext, ContextFunction, Environment,
+};
 use crate::expr::inference::canonic::ResultNoErrEx;
-use crate::expr::inference::{Inference, InferenceData, InferenceError, InferenceId, TypeVar};
+use crate::expr::inference::{InferenceData, InferenceError, InferenceId, TypeVar};
 use crate::items::attribute::SemanticQueryAttrs;
 use crate::items::constant::{resolve_const_expr_and_evaluate, ConstValue, ConstValueId};
 use crate::items::imp::{ImplId, ImplLookupContext};
@@ -47,6 +50,7 @@ pub enum TypeLongId {
     },
     ImplType(ImplTypeId),
     TraitType(TraitTypeId),
+    Closure(ClosureTypeLongId),
     Missing(#[dont_rewrite] DiagnosticAdded),
 }
 impl OptionFrom<TypeLongId> for ConcreteTypeId {
@@ -109,37 +113,7 @@ impl TypeId {
 }
 impl TypeLongId {
     pub fn format(&self, db: &dyn SemanticGroup) -> String {
-        let def_db = db.upcast();
-        match self {
-            TypeLongId::Concrete(concrete) => concrete.format(db),
-            TypeLongId::Tuple(inner_types) => {
-                if inner_types.len() == 1 {
-                    format!("({},)", inner_types[0].format(db))
-                } else {
-                    format!("({})", inner_types.iter().map(|ty| ty.format(db)).join(", "))
-                }
-            }
-            TypeLongId::Snapshot(ty) => format!("@{}", ty.format(db)),
-            TypeLongId::GenericParameter(generic_param) => {
-                format!("{}", generic_param.name(def_db).unwrap_or_else(|| "_".into()))
-            }
-            TypeLongId::ImplType(impl_type_id) => {
-                format!("{}::{}", impl_type_id.impl_id.name(db), impl_type_id.ty.name(def_db))
-            }
-            TypeLongId::Var(var) => format!("?{}", var.id.0),
-            TypeLongId::Coupon(function_id) => format!("{}::Coupon", function_id.full_name(db)),
-            TypeLongId::Missing(_) => "<missing>".to_string(),
-            TypeLongId::FixedSizeArray { type_id, size } => {
-                format!("[{}; {:?}]", type_id.format(db), size.debug(db.elongate()))
-            }
-            TypeLongId::TraitType(trait_type_id) => {
-                format!(
-                    "{}::{}",
-                    trait_type_id.trait_id(def_db).name(def_db),
-                    trait_type_id.name(def_db)
-                )
-            }
-        }
+        format!("{:?}", self.debug(db.elongate()))
     }
 
     /// Returns the [TypeHead] for a type if available.
@@ -154,23 +128,31 @@ impl TypeLongId {
             | TypeLongId::Var(_)
             | TypeLongId::Missing(_)
             | TypeLongId::ImplType(_)
-            | TypeLongId::TraitType(_) => {
+            | TypeLongId::TraitType(_)
+            | TypeLongId::Closure(_) => {
                 return None;
             }
         })
     }
 
     /// Returns whether the type is phantom.
-    /// Type is considered phantom if it has the `#[phantom]` attribute, or is a tuple or fixed
-    /// sized array containing it.
+    /// Type is considered phantom if it has the `#[phantom]` attribute, (or an other attribute
+    /// declared by a plugin as defining a phantom type), or is a tuple or fixed sized array
+    /// containing it.
     pub fn is_phantom(&self, db: &dyn SemanticGroup) -> bool {
+        let phantom_type_attributes = db.declared_phantom_type_attributes();
         match self {
             TypeLongId::Concrete(id) => match id {
-                ConcreteTypeId::Struct(id) => id.has_attr(db, PHANTOM_ATTR),
-                ConcreteTypeId::Enum(id) => id.has_attr(db, PHANTOM_ATTR),
-                ConcreteTypeId::Extern(id) => id.has_attr(db, PHANTOM_ATTR),
-            }
-            .unwrap_or_default(),
+                ConcreteTypeId::Struct(id) => phantom_type_attributes
+                    .iter()
+                    .any(|attr| id.has_attr(db, attr).unwrap_or_default()),
+                ConcreteTypeId::Enum(id) => phantom_type_attributes
+                    .iter()
+                    .any(|attr| id.has_attr(db, attr).unwrap_or_default()),
+                ConcreteTypeId::Extern(id) => phantom_type_attributes
+                    .iter()
+                    .any(|attr| id.has_attr(db, attr).unwrap_or_default()),
+            },
             TypeLongId::Tuple(inner) => inner.iter().any(|ty| ty.is_phantom(db)),
             TypeLongId::FixedSizeArray { type_id, .. } => type_id.is_phantom(db),
             TypeLongId::Snapshot(_)
@@ -179,7 +161,8 @@ impl TypeLongId {
             | TypeLongId::Coupon(_)
             | TypeLongId::TraitType(_)
             | TypeLongId::ImplType(_)
-            | TypeLongId::Missing(_) => false,
+            | TypeLongId::Missing(_)
+            | TypeLongId::Closure(_) => false,
         }
     }
 }
@@ -189,126 +172,42 @@ impl DebugWithDb<dyn SemanticGroup> for TypeLongId {
         f: &mut std::fmt::Formatter<'_>,
         db: &(dyn SemanticGroup + 'static),
     ) -> std::fmt::Result {
-        write!(f, "{}", self.format(db))
-    }
-}
-
-/// Tries to implize a type, recursively, according to known inference data.
-///
-/// "Implization" is reducing a trait type or a wrapped trait type, to the more concrete type,
-/// according to the assignment of that trait type in its impl, if the impl is known according to
-/// the context.
-///
-/// This function uses the given `inference` as "read-only". That is, it doesn't add new inference
-/// data, only uses the existing data.
-///
-/// `impl_ctx` is the impl context we're at, if any. That is, if we're inside an impl function, the
-/// wrapping impl is the context here.
-pub fn implize_type(
-    db: &dyn SemanticGroup,
-    type_to_reduce: TypeId,
-    impl_ctx: Option<ImplDefId>,
-    inference: &mut Inference<'_>,
-) -> Maybe<TypeId> {
-    // TODO(yuval): inline.
-    implize_type_recursive(db, type_to_reduce, impl_ctx, inference)
-}
-
-/// Tries to implize a type, recursively, according to known inference data.
-///
-/// Assumes `inference.solve()` was called and doesn't change the inference structure (although
-/// it's passed as &mut which is required per it's API).
-///
-/// `impl_ctx` is the impl context we're at, if any. That is, if we're inside an impl function, the
-/// wrapping impl is the context here.
-fn implize_type_recursive(
-    db: &dyn SemanticGroup,
-    type_to_reduce: TypeId,
-    impl_ctx: Option<ImplDefId>,
-    inference: &mut Inference<'_>,
-) -> Maybe<TypeId> {
-    // First, reduce if already inferred.
-    let type_to_reduce = inference.rewrite(type_to_reduce).unwrap();
-
-    // Then, reduce recursively.
-    let mut long_ty = type_to_reduce.lookup_intern(db);
-    match &mut long_ty {
-        TypeLongId::Concrete(concrete_type) => {
-            let mut generic_args = concrete_type.generic_args(db);
-            for generic_arg in generic_args.iter_mut() {
-                let GenericArgumentId::Type(generic_arg_type) = generic_arg else {
-                    continue;
-                };
-                *generic_arg_type =
-                    implize_type_recursive(db, *generic_arg_type, impl_ctx, inference)?;
-                *generic_arg = GenericArgumentId::Type(*generic_arg_type);
+        let def_db = db.upcast();
+        match self {
+            TypeLongId::Concrete(concrete) => write!(f, "{}", concrete.format(db)),
+            TypeLongId::Tuple(inner_types) => {
+                if inner_types.len() == 1 {
+                    write!(f, "({},)", inner_types[0].format(db))
+                } else {
+                    write!(f, "({})", inner_types.iter().map(|ty| ty.format(db)).join(", "))
+                }
             }
-            concrete_type.modify_generic_args(db, generic_args);
-        }
-        TypeLongId::Tuple(types) => {
-            for ty in types.iter_mut() {
-                *ty = implize_type_recursive(db, *ty, impl_ctx, inference)?;
+            TypeLongId::Snapshot(ty) => write!(f, "@{}", ty.format(db)),
+            TypeLongId::GenericParameter(generic_param) => {
+                write!(f, "{}", generic_param.name(def_db).unwrap_or_else(|| "_".into()))
+            }
+            TypeLongId::ImplType(impl_type_id) => {
+                write!(f, "{}::{}", impl_type_id.impl_id.name(db), impl_type_id.ty.name(def_db))
+            }
+            TypeLongId::Var(var) => write!(f, "?{}", var.id.0),
+            TypeLongId::Coupon(function_id) => write!(f, "{}::Coupon", function_id.full_name(db)),
+            TypeLongId::Missing(_) => write!(f, "<missing>"),
+            TypeLongId::FixedSizeArray { type_id, size } => {
+                write!(f, "[{}; {:?}]", type_id.format(db), size.debug(db.elongate()))
+            }
+            TypeLongId::TraitType(trait_type_id) => {
+                write!(
+                    f,
+                    "{}::{}",
+                    trait_type_id.trait_id(def_db).name(def_db),
+                    trait_type_id.name(def_db)
+                )
+            }
+            TypeLongId::Closure(closure) => {
+                write!(f, "{:?}", closure.debug(db.elongate()))
             }
         }
-        TypeLongId::Snapshot(ty) => *ty = implize_type_recursive(db, *ty, impl_ctx, inference)?,
-        TypeLongId::GenericParameter(_)
-        | TypeLongId::Var(_)
-        | TypeLongId::ImplType(_)
-        | TypeLongId::Coupon(_)
-        | TypeLongId::Missing(_) => {}
-        TypeLongId::FixedSizeArray { type_id, .. } => {
-            *type_id = implize_type_recursive(db, *type_id, impl_ctx, inference)?
-        }
-        TypeLongId::TraitType(ty) => {
-            let Some(impl_ctx) = impl_ctx else {
-                // Nothing to implize. No need to report anything as it should be reported during
-                // resolution.
-                return Ok(type_to_reduce);
-            };
-            return Ok(db.trait_type_implized_by_context(*ty, impl_ctx)?.unwrap_or(type_to_reduce));
-        }
     }
-    let type_to_reduce = long_ty.intern(db);
-
-    // Finally, reduce/implize the impl type itself, if possible.
-
-    let TypeLongId::ImplType(mut impl_type_id) = type_to_reduce.lookup_intern(db) else {
-        // Nothing to implize.
-        return Ok(type_to_reduce);
-    };
-
-    // Try to reduce the impl type if its impl is an ImplVar (by reducing its impl).
-    impl_type_id = reduce_trait_impl_type(impl_type_id, inference);
-
-    // Try to implize the impl type if its impl is concrete.
-    if let Some(ty) = db.impl_type_concrete_implized(impl_type_id)? {
-        return Ok(ty);
-    }
-
-    // Try to implize by the impl context, if given. E.g. for `Self::MyType` inside an impl.
-    if let Some(impl_def_id) = impl_ctx {
-        if let Some(ty) = db.trait_type_implized_by_context(impl_type_id.ty(), impl_def_id)? {
-            return Ok(ty);
-        }
-    }
-
-    // Could not reduce.
-    Ok(type_to_reduce)
-}
-
-/// Reduces an impl type if its impl is an ImplVar. E.g. in the case of MyTrait::MyType when there
-/// is only a single impl for MyTrait in the context.
-///
-/// Assumes the given `inference.solve()` was called.
-fn reduce_trait_impl_type(impl_type_id: ImplTypeId, inference: &mut Inference<'_>) -> ImplTypeId {
-    let ImplTypeId { impl_id, ty } = impl_type_id;
-    if !matches!(impl_id, crate::items::imp::ImplId::ImplVar(_)) {
-        return impl_type_id;
-    };
-
-    let impl_id = inference.rewrite(impl_id).unwrap();
-
-    ImplTypeId { impl_id, ty }
 }
 
 /// Head of a type. A type that is not one of {generic param, type variable, impl type} has a head,
@@ -366,15 +265,26 @@ impl ConcreteTypeId {
     pub fn format(&self, db: &dyn SemanticGroup) -> String {
         // TODO(spapini): Format generics.
         let generic_type_format = self.generic_type(db).format(db.upcast());
-        let generic_args = self.generic_args(db);
-        if generic_args.is_empty() {
-            generic_type_format
+        let mut generic_args = self.generic_args(db).into_iter();
+        if let Some(first) = generic_args.next() {
+            // Soft limit for the number of chars in the formatted type.
+            const CHARS_BOUND: usize = 500;
+            let mut f = generic_type_format;
+            f.push_str("::<");
+            f.push_str(&first.format(db));
+            for arg in generic_args {
+                // If the formatted type is becoming too long, stop adding more arguments.
+                if f.len() > CHARS_BOUND {
+                    f.push_str(", ...");
+                    break;
+                }
+                f.push_str(", ");
+                f.push_str(&arg.format(db));
+            }
+            f.push('>');
+            f
         } else {
-            format!(
-                "{}::<{}>",
-                generic_type_format,
-                generic_args.iter().map(|arg| arg.format(db)).join(", ")
-            )
+            generic_type_format
         }
     }
 
@@ -395,33 +305,6 @@ impl ConcreteTypeId {
     /// Returns true if the type does not contain any inference variables.
     pub fn is_var_free(&self, db: &dyn SemanticGroup) -> bool {
         self.generic_args(db).iter().all(|generic_argument_id| generic_argument_id.is_var_free(db))
-    }
-
-    /// Modifies the generic arguments of the type to the given `new_generic_args`.
-    fn modify_generic_args(
-        &mut self,
-        db: &dyn SemanticGroup,
-        new_generic_args: Vec<GenericArgumentId>,
-    ) {
-        match self {
-            ConcreteTypeId::Struct(id) => {
-                let long_id = id.lookup_intern(db);
-                let new_long_id =
-                    ConcreteStructLongId { generic_args: new_generic_args, ..long_id };
-                *self = ConcreteTypeId::Struct(new_long_id.intern(db));
-            }
-            ConcreteTypeId::Enum(id) => {
-                let long_id = id.lookup_intern(db);
-                let new_long_id = ConcreteEnumLongId { generic_args: new_generic_args, ..long_id };
-                *self = ConcreteTypeId::Enum(new_long_id.intern(db));
-            }
-            ConcreteTypeId::Extern(id) => {
-                let long_id = id.lookup_intern(db);
-                let new_long_id =
-                    ConcreteExternTypeLongId { generic_args: new_generic_args, ..long_id };
-                *self = ConcreteTypeId::Extern(new_long_id.intern(db));
-            }
-        }
     }
 }
 impl DebugWithDb<dyn SemanticGroup> for ConcreteTypeId {
@@ -525,6 +408,32 @@ impl ConcreteExternTypeId {
     }
 }
 
+/// A type id of a closure function.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, SemanticObject)]
+pub struct ClosureTypeLongId {
+    pub param_tys: Vec<TypeId>,
+    pub ret_ty: TypeId,
+    /// The set of types captured by the closure, this field is used to determined if the
+    /// closure has Drop, Destruct or PanicDestruct.
+    /// A vector as the fields needs to be hashable.
+    pub captured_types: Vec<TypeId>,
+    /// The parent function of the closure or an error.
+    pub parent_function: Maybe<FunctionId>,
+    /// Every closure has a unique type that is based on the stable location of its wrapper.
+    #[dont_rewrite]
+    pub wrapper_location: StableLocation,
+}
+
+impl DebugWithDb<dyn SemanticGroup> for ClosureTypeLongId {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        db: &(dyn SemanticGroup + 'static),
+    ) -> std::fmt::Result {
+        write!(f, "{{closure@{:?}}}", self.wrapper_location.debug(db.upcast()))
+    }
+}
+
 /// An impl item of kind type.
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, SemanticObject)]
 pub struct ImplTypeId {
@@ -537,7 +446,7 @@ impl ImplTypeId {
     /// Creates a new impl type id. For an impl type of a concrete impl, asserts that the trait
     /// type belongs to the same trait that the impl implements (panics if not).
     pub fn new(impl_id: ImplId, ty: TraitTypeId, db: &dyn SemanticGroup) -> Self {
-        if let crate::items::imp::ImplId::Concrete(concrete_impl) = impl_id {
+        if let crate::items::imp::ImplLongId::Concrete(concrete_impl) = impl_id.lookup_intern(db) {
             let impl_def_id = concrete_impl.impl_def_id(db);
             assert_eq!(Ok(ty.trait_id(db.upcast())), db.impl_def_trait(impl_def_id));
         }
@@ -549,13 +458,6 @@ impl ImplTypeId {
     }
     pub fn ty(&self) -> TraitTypeId {
         self.ty
-    }
-    /// Gets the impl type def (language element), if `self.impl_id` is of a concrete impl.
-    pub fn impl_type_def(&self, db: &dyn SemanticGroup) -> Maybe<Option<ImplTypeDefId>> {
-        match self.impl_id {
-            ImplId::Concrete(concrete_impl_id) => concrete_impl_id.get_impl_type_def(db, self.ty),
-            ImplId::GenericParameter(_) | ImplId::ImplVar(_) => Ok(None),
-        }
     }
     pub fn format(&self, db: &dyn SemanticGroup) -> SmolStr {
         format!("{}::{}", self.impl_id.name(db.upcast()), self.ty.name(db.upcast())).into()
@@ -664,22 +566,27 @@ pub fn extract_fixed_size_array_size(
                 db,
                 (resolver.data).clone_with_inference_id(db, resolver.inference_data.inference_id),
             );
-            let mut ctx =
-                ComputationContext::new(db, diagnostics, None, resolver, None, environment);
+            let mut ctx = ComputationContext::new(
+                db,
+                diagnostics,
+                resolver,
+                None,
+                environment,
+                ContextFunction::Global,
+            );
             let size_expr_syntax = size_clause.size(syntax_db);
-            let size = compute_expr_semantic(&mut ctx, &size_expr_syntax, None);
-            let (_, const_value) = resolve_const_expr_and_evaluate(
+            let size = compute_expr_semantic(&mut ctx, &size_expr_syntax);
+            let const_value = resolve_const_expr_and_evaluate(
                 db,
                 &mut ctx,
                 &size,
                 size_expr_syntax.stable_ptr().untyped(),
                 get_usize_ty(db),
             );
-            match &const_value {
-                ConstValue::Int(_) => Ok(Some(const_value.intern(db))),
-                ConstValue::Generic(_) => Ok(Some(const_value.intern(db))),
-
-                _ => Err(diagnostics.report(syntax, FixedSizeArrayNonNumericSize)),
+            if matches!(const_value, ConstValue::Int(_, _) | ConstValue::Generic(_)) {
+                Ok(Some(const_value.intern(db)))
+            } else {
+                Err(diagnostics.report(syntax, FixedSizeArrayNonNumericSize))
             }
         }
         ast::OptionFixedSizeArraySize::Empty(_) => Ok(None),
@@ -729,13 +636,7 @@ pub fn get_impl_at_context(
     let mut inference = inference_data.inference(db);
     // It's ok to consume the errors without reporting as this is a helper function meant to find an
     // impl and return it, but it's ok if the impl can't be found.
-    let impl_id = inference.new_impl_var(concrete_trait_id, stable_ptr, lookup_context).map_err(
-        |err_set| {
-            inference
-                .consume_error_without_reporting(err_set)
-                .expect("Error couldn't be already consumed")
-        },
-    )?;
+    let impl_id = inference.new_impl_var(concrete_trait_id, stable_ptr, lookup_context);
     if let Err((err_set, _)) = inference.finalize_without_reporting() {
         return Err(inference
             .consume_error_without_reporting(err_set)
@@ -782,11 +683,12 @@ pub fn single_value_type(db: &dyn SemanticGroup, ty: TypeId) -> Maybe<bool> {
         | TypeLongId::Missing(_)
         | TypeLongId::Coupon(_)
         | TypeLongId::ImplType(_)
-        | TypeLongId::TraitType(_) => false,
+        | TypeLongId::TraitType(_)
+        | TypeLongId::Closure(_) => false,
         TypeLongId::FixedSizeArray { type_id, size } => {
             db.single_value_type(type_id)?
                 || matches!(size.lookup_intern(db),
-                            ConstValue::Int(value) if value.is_zero())
+                            ConstValue::Int(value, _) if value.is_zero())
         }
     })
 }
@@ -831,7 +733,7 @@ pub fn type_size_info(db: &dyn SemanticGroup, ty: TypeId) -> Maybe<TypeSizeInfor
         TypeLongId::Concrete(concrete_type_id) => match concrete_type_id {
             ConcreteTypeId::Struct(id) => {
                 let mut zero_sized = true;
-                for (_, member) in db.struct_members(id.struct_id(db))? {
+                for (_, member) in db.struct_members(id.struct_id(db))?.iter() {
                     if db.type_size_info(member.ty)? != TypeSizeInformation::ZeroSized {
                         zero_sized = false;
                     }
@@ -869,9 +771,10 @@ pub fn type_size_info(db: &dyn SemanticGroup, ty: TypeId) -> Maybe<TypeSizeInfor
         | TypeLongId::Var(_)
         | TypeLongId::Missing(_)
         | TypeLongId::TraitType(_)
-        | TypeLongId::ImplType(_) => {}
+        | TypeLongId::ImplType(_)
+        | TypeLongId::Closure(_) => {}
         TypeLongId::FixedSizeArray { type_id, size } => {
-            if matches!(size.lookup_intern(db), ConstValue::Int(value) if value.is_zero())
+            if matches!(size.lookup_intern(db), ConstValue::Int(value,_) if value.is_zero())
                 || db.type_size_info(type_id)? == TypeSizeInformation::ZeroSized
             {
                 return Ok(TypeSizeInformation::ZeroSized);
@@ -884,7 +787,7 @@ pub fn type_size_info(db: &dyn SemanticGroup, ty: TypeId) -> Maybe<TypeSizeInfor
 /// Cycle handling of [crate::db::SemanticGroup::type_size_info].
 pub fn type_size_info_cycle(
     _db: &dyn SemanticGroup,
-    _cycle: &[String],
+    _cycle: &salsa::Cycle,
     _ty: &TypeId,
 ) -> Maybe<TypeSizeInformation> {
     Ok(TypeSizeInformation::Infinite)
@@ -924,6 +827,10 @@ pub fn priv_type_is_fully_concrete(db: &dyn SemanticGroup, ty: TypeId) -> bool {
         TypeLongId::FixedSizeArray { type_id, size } => {
             type_id.is_fully_concrete(db) && size.is_fully_concrete(db)
         }
+        TypeLongId::Closure(closure) => {
+            closure.param_tys.iter().all(|param| param.is_fully_concrete(db))
+                && closure.ret_ty.is_fully_concrete(db)
+        }
     }
 }
 
@@ -933,19 +840,29 @@ pub fn priv_type_is_var_free(db: &dyn SemanticGroup, ty: TypeId) -> bool {
         TypeLongId::Tuple(types) => types.iter().all(|ty| ty.is_var_free(db)),
         TypeLongId::Snapshot(ty) => ty.is_var_free(db),
         TypeLongId::Var(_) => false,
-        TypeLongId::GenericParameter(_) | TypeLongId::Missing(_) | TypeLongId::ImplType(_) => true,
+        TypeLongId::GenericParameter(_) | TypeLongId::Missing(_) | TypeLongId::TraitType(_) => true,
         TypeLongId::Coupon(function_id) => function_id.is_var_free(db),
         TypeLongId::FixedSizeArray { type_id, size } => {
             type_id.is_var_free(db) && size.is_var_free(db)
         }
-        TypeLongId::TraitType(_) => true,
+        // TODO(TomerStarkware): consider rename the function to `priv_type_might_need_rewrite`.
+        // a var free ImplType needs to be rewritten if has impl bounds constraints.
+        TypeLongId::ImplType(_) => false,
+        TypeLongId::Closure(closure) => {
+            closure.param_tys.iter().all(|param| param.is_var_free(db))
+                && closure.ret_ty.is_var_free(db)
+        }
     }
 }
 
 /// Peels all wrapping Snapshot (`@`) from the type.
 /// Returns the number of peeled snapshots and the inner type.
 pub fn peel_snapshots(db: &dyn SemanticGroup, ty: TypeId) -> (usize, TypeLongId) {
-    let mut long_ty = ty.lookup_intern(db);
+    peel_snapshots_ex(db, ty.lookup_intern(db))
+}
+
+/// Same as `peel_snapshots`, but takes a `TypeLongId` instead of a `TypeId`.
+pub fn peel_snapshots_ex(db: &dyn SemanticGroup, mut long_ty: TypeLongId) -> (usize, TypeLongId) {
     let mut n_snapshots = 0;
     while let TypeLongId::Snapshot(ty) = long_ty {
         long_ty = ty.lookup_intern(db);

@@ -49,7 +49,7 @@ pub fn reformat_rust_code(text: String) -> String {
 }
 pub fn reformat_rust_code_inner(text: String) -> String {
     let sh = Shell::new().unwrap();
-    sh.set_var("RUSTUP_TOOLCHAIN", "nightly-2024-04-23");
+    sh.set_var("RUSTUP_TOOLCHAIN", "nightly-2024-08-22");
     let rustfmt_toml = project_root().join("rustfmt.toml");
     let mut stdout = cmd!(sh, "rustfmt --config-path {rustfmt_toml}").stdin(text).read().unwrap();
     if !stdout.ends_with('\n') {
@@ -672,7 +672,7 @@ fn gen_struct_code(name: String, members: Vec<Member>, is_terminal: bool) -> rus
         #[derive(Clone, Debug, Eq, Hash, PartialEq)]
         pub struct $(&name) {
             node: SyntaxNode,
-            children: Arc<Vec<SyntaxNode>>,
+            children: Arc<[SyntaxNode]>,
         }
         $new_green_impl
         impl $(&name) {

@@ -1,15 +1,16 @@
 use std::sync::Arc;
 
-use cairo_lang_defs::db::{DefsDatabase, DefsGroup};
+use cairo_lang_defs::db::{ext_as_virtual_impl, DefsDatabase, DefsGroup};
 use cairo_lang_defs::ids::ModuleId;
 use cairo_lang_defs::plugin::{
     MacroPlugin, MacroPluginMetadata, PluginDiagnostic, PluginGeneratedFile, PluginResult,
 };
 use cairo_lang_filesystem::cfg::CfgSet;
 use cairo_lang_filesystem::db::{
-    init_files_group, AsFilesGroupMut, CrateConfiguration, FilesDatabase, FilesGroup, FilesGroupEx,
+    init_files_group, AsFilesGroupMut, CrateConfiguration, ExternalFiles, FilesDatabase,
+    FilesGroup, FilesGroupEx,
 };
-use cairo_lang_filesystem::ids::{CrateLongId, Directory, FileLongId};
+use cairo_lang_filesystem::ids::{CrateLongId, Directory, FileLongId, VirtualFile};
 use cairo_lang_parser::db::ParserDatabase;
 use cairo_lang_syntax::node::ast;
 use cairo_lang_syntax::node::db::{SyntaxDatabase, SyntaxGroup};
@@ -49,6 +50,11 @@ pub struct DatabaseForTesting {
     storage: salsa::Storage<DatabaseForTesting>,
 }
 impl salsa::Database for DatabaseForTesting {}
+impl ExternalFiles for DatabaseForTesting {
+    fn ext_as_virtual(&self, external_id: salsa::InternId) -> VirtualFile {
+        ext_as_virtual_impl(self.upcast(), external_id)
+    }
+}
 impl Default for DatabaseForTesting {
     fn default() -> Self {
         let mut res = Self { storage: Default::default() };
@@ -119,8 +125,7 @@ pub fn test_expand_plugin_inner(
 
     // Main module file.
     let file_id = FileLongId::OnDisk("test_src/lib.cairo".into()).intern(db);
-    db.as_files_group_mut()
-        .override_file_content(file_id, Some(Arc::new(format!("{cairo_code}\n"))));
+    db.as_files_group_mut().override_file_content(file_id, Some(format!("{cairo_code}\n").into()));
 
     let mut diagnostic_items = vec![];
     let expanded_module =

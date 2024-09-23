@@ -33,7 +33,8 @@ pub struct Parser<'a> {
     pending_trivia: Vec<TriviumGreen>,
     /// The current offset, excluding the current terminal.
     offset: TextOffset,
-    /// The width of the current terminal being handled.
+    /// The width of the current terminal being handled (excluding the trivia length of this
+    /// terminal).
     current_width: TextWidth,
     /// The length of the trailing trivia following the last read token.
     last_trivia_length: TextWidth,
@@ -181,14 +182,17 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse_syntax_file(mut self) -> SyntaxFileGreen {
-        let items = ModuleItemList::new_green(
-            self.db,
-            self.parse_attributed_list(
-                Self::try_parse_module_item,
-                is_of_kind!(),
-                MODULE_ITEM_DESCRIPTION,
-            ),
-        );
+        let mut module_items = vec![];
+        if let Some(doc_item) = self.take_doc() {
+            module_items.push(doc_item.into());
+        }
+        module_items.extend(self.parse_attributed_list(
+            Self::try_parse_module_item,
+            is_of_kind!(),
+            MODULE_ITEM_DESCRIPTION,
+        ));
+        // Create a new vec with the doc item as the children.
+        let items = ModuleItemList::new_green(self.db, module_items);
         // This will not panic since the above parsing only stops when reaches EOF.
         assert_eq!(self.peek().kind, SyntaxKind::TerminalEndOfFile);
 
@@ -346,14 +350,16 @@ impl<'a> Parser<'a> {
         let body = match self.peek().kind {
             SyntaxKind::TerminalLBrace => {
                 let lbrace = self.take::<TerminalLBrace>();
-                let items = ModuleItemList::new_green(
-                    self.db,
-                    self.parse_attributed_list(
-                        Self::try_parse_module_item,
-                        is_of_kind!(rbrace),
-                        MODULE_ITEM_DESCRIPTION,
-                    ),
-                );
+                let mut module_items = vec![];
+                if let Some(doc_item) = self.take_doc() {
+                    module_items.push(doc_item.into());
+                }
+                module_items.extend(self.parse_attributed_list(
+                    Self::try_parse_module_item,
+                    is_of_kind!(rbrace),
+                    MODULE_ITEM_DESCRIPTION,
+                ));
+                let items = ModuleItemList::new_green(self.db, module_items);
                 let rbrace = self.parse_token::<TerminalRBrace>();
                 ModuleBody::new_green(self.db, lbrace, items, rbrace).into()
             }
@@ -847,14 +853,14 @@ impl<'a> Parser<'a> {
     }
 
     /// Assumes the current token is Impl.
-    /// Expected pattern: `impl <name> of <trait_path>;`
+    /// Expected pattern: `impl <name>: <trait_path>;`
     fn expect_trait_item_impl(&mut self, attributes: AttributeListGreen) -> TraitItemImplGreen {
         let impl_kw = self.take::<TerminalImpl>();
         let name = self.parse_identifier();
-        let of_kw = self.take::<TerminalOf>();
+        let colon = self.parse_token::<TerminalColon>();
         let trait_path = self.parse_type_path();
         let semicolon = self.parse_token::<TerminalSemicolon>();
-        TraitItemImpl::new_green(self.db, attributes, impl_kw, name, of_kw, trait_path, semicolon)
+        TraitItemImpl::new_green(self.db, attributes, impl_kw, name, colon, trait_path, semicolon)
     }
 
     /// Assumes the current token is Impl.
@@ -1064,6 +1070,7 @@ impl<'a> Parser<'a> {
             SyntaxKind::TerminalOrOr => self.take::<TerminalOrOr>().into(),
             SyntaxKind::TerminalOr => self.take::<TerminalOr>().into(),
             SyntaxKind::TerminalXor => self.take::<TerminalXor>().into(),
+            SyntaxKind::TerminalDotDot => self.take::<TerminalDotDot>().into(),
             _ => unreachable!(),
         }
     }
@@ -1192,6 +1199,15 @@ impl<'a> Parser<'a> {
             }
             SyntaxKind::TerminalWhile if lbrace_allowed == LbraceAllowed::Allow => {
                 Ok(self.expect_while_expr().into())
+            }
+            SyntaxKind::TerminalFor if lbrace_allowed == LbraceAllowed::Allow => {
+                Ok(self.expect_for_expr().into())
+            }
+            SyntaxKind::TerminalOr if lbrace_allowed == LbraceAllowed::Allow => {
+                Ok(self.expect_closure_expr_nary().into())
+            }
+            SyntaxKind::TerminalOrOr if lbrace_allowed == LbraceAllowed::Allow => {
+                Ok(self.expect_closure_expr_nullary().into())
             }
 
             _ => {
@@ -1687,6 +1703,60 @@ impl<'a> Parser<'a> {
         ExprWhile::new_green(self.db, while_kw, condition, body)
     }
 
+    /// Assumes the current token is `For`.
+    /// Expected pattern: `for <pattern> <identifier> <expression> <block>`.
+    /// Identifier will be checked to be 'in' in semantics.
+    fn expect_for_expr(&mut self) -> ExprForGreen {
+        let for_kw = self.take::<TerminalFor>();
+        let pattern = self.parse_pattern();
+        let ident = self.take_raw();
+        let in_identifier: TerminalIdentifierGreen = match ident.text.as_str() {
+            "in" => self.add_trivia_to_terminal::<TerminalIdentifier>(ident),
+            _ => {
+                self.append_skipped_token_to_pending_trivia(
+                    ident,
+                    ParserDiagnosticKind::SkippedElement { element_name: "'in'".into() },
+                );
+                TerminalIdentifier::missing(self.db)
+            }
+        };
+        let expression = self.parse_expr_limited(MAX_PRECEDENCE, LbraceAllowed::Forbid);
+        let body = self.parse_block();
+        ExprFor::new_green(self.db, for_kw, pattern, in_identifier, expression, body)
+    }
+
+    /// Assumes the current token is `|`.
+    /// Expected pattern: `| <params> | <ReturnTypeClause> <expression>`.
+    fn expect_closure_expr_nary(&mut self) -> ExprClosureGreen {
+        let leftor = self.take::<TerminalOr>();
+        let params = self.parse_closure_param_list();
+        let rightor = self.parse_token::<TerminalOr>();
+
+        self.parse_closure_expr_body(
+            ClosureParamWrapperNAry::new_green(self.db, leftor, params, rightor).into(),
+        )
+    }
+    /// Assumes the current token is `||`.
+    /// Expected pattern: `|| <ReturnTypeClause> <expression> `.
+    fn expect_closure_expr_nullary(&mut self) -> ExprClosureGreen {
+        let wrapper = self.take::<TerminalOrOr>().into();
+        self.parse_closure_expr_body(wrapper)
+    }
+    fn parse_closure_expr_body(&mut self, wrapper: ClosureParamWrapperGreen) -> ExprClosureGreen {
+        let mut block_required = self.peek().kind == SyntaxKind::TerminalArrow;
+
+        let return_type_clause = self.parse_option_return_type_clause();
+        let optional_no_panic = if self.peek().kind == SyntaxKind::TerminalNoPanic {
+            block_required = true;
+            self.take::<TerminalNoPanic>().into()
+        } else {
+            OptionTerminalNoPanicEmpty::new_green(self.db).into()
+        };
+        let expr = if block_required { self.parse_block().into() } else { self.parse_expr() };
+
+        ExprClosure::new_green(self.db, wrapper, return_type_clause, optional_no_panic, expr)
+    }
+
     /// Assumes the current token is LBrack.
     /// Expected pattern: `\[<expr>; <expr>\]`.
     fn expect_fixed_size_array_expr(&mut self) -> ExprFixedSizeArrayGreen {
@@ -1920,6 +1990,12 @@ impl<'a> Parser<'a> {
                 let semicolon = self.parse_token::<TerminalSemicolon>();
                 Ok(StatementBreak::new_green(self.db, attributes, break_kw, expr, semicolon).into())
             }
+            SyntaxKind::TerminalConst => Ok(StatementItem::new_green(
+                self.db,
+                self.expect_item_const(attributes, VisibilityDefault::new_green(self.db).into())
+                    .into(),
+            )
+            .into()),
             _ => match self.try_parse_expr() {
                 Ok(expr) => {
                     let optional_semicolon = if self.peek().kind == SyntaxKind::TerminalSemicolon {
@@ -2017,6 +2093,18 @@ impl<'a> Parser<'a> {
         )
     }
 
+    /// Returns a GreenId of a node with kind ClosureParamList.
+    fn parse_closure_param_list(&mut self) -> ParamListGreen {
+        ParamList::new_green(
+            self.db,
+            self.parse_separated_list::<Param, TerminalComma, ParamListElementOrSeparatorGreen>(
+                Self::try_parse_closure_param,
+                is_of_kind!(or, block, lbrace, rbrace, module_item_kw),
+                "parameter",
+            ),
+        )
+    }
+
     /// Returns a GreenId of a node with kind Modifier or TryParseFailure if a modifier can't be
     /// parsed.
     fn try_parse_modifier(&mut self) -> Option<ModifierGreen> {
@@ -2048,9 +2136,31 @@ impl<'a> Parser<'a> {
             self.parse_identifier()
         };
 
-        let type_clause = self.parse_type_clause(ErrorRecovery {
-            should_stop: is_of_kind!(comma, rparen, module_item_kw),
-        });
+        let type_clause = self
+            .parse_type_clause(ErrorRecovery {
+                should_stop: is_of_kind!(comma, rparen, module_item_kw),
+            })
+            .into();
+        Ok(Param::new_green(
+            self.db,
+            ModifierList::new_green(self.db, modifier_list),
+            name,
+            type_clause,
+        ))
+    }
+
+    /// Returns a GreenId of a node with kind Param or TryParseFailure if a parameter can't
+    /// be parsed.
+    fn try_parse_closure_param(&mut self) -> TryParseResult<ParamGreen> {
+        let modifier_list = self.parse_modifier_list();
+        let name = if modifier_list.is_empty() {
+            self.try_parse_identifier()?
+        } else {
+            // If we had modifiers then the identifier is not optional and can't be '_'.
+            self.parse_identifier()
+        };
+
+        let type_clause = self.parse_option_type_clause();
         Ok(Param::new_green(
             self.db,
             ModifierList::new_green(self.db, modifier_list),
@@ -2278,6 +2388,8 @@ impl<'a> Parser<'a> {
                 ExprUnary::new_green(self.db, op, expr).into()
             }
             SyntaxKind::TerminalShortString => self.take_terminal_short_string().into(),
+            SyntaxKind::TerminalTrue => self.take::<TerminalTrue>().into(),
+            SyntaxKind::TerminalFalse => self.take::<TerminalFalse>().into(),
             SyntaxKind::TerminalLBrace => self.parse_block().into(),
             _ => self.try_parse_type_expr()?,
         };
@@ -2734,6 +2846,46 @@ impl<'a> Parser<'a> {
         let token = self.take_raw();
         assert_eq!(token.kind, Terminal::KIND);
         self.add_trivia_to_terminal::<Terminal>(token)
+    }
+
+    /// If the current leading trivia start with non-doc comments, creates a new `ItemHeaderDoc` and
+    /// appends the trivia to it. The purpose of this item is to prevent non-doc comments moving
+    /// from the top of the file formatter.
+    fn take_doc(&mut self) -> Option<ItemHeaderDocGreen> {
+        // Take all the trivia from `self.next_terminal`, until a doc-comment is found. If the
+        // result does not contain a non-doc comment (i.e. regular comment or inner
+        // comment), return None and do not change the next terminal leading trivia.
+        let mut has_header_doc = false;
+        let mut split_index = 0;
+        for trivium in self.next_terminal.leading_trivia.iter() {
+            match trivium.0.lookup_intern(self.db).kind {
+                SyntaxKind::TokenSingleLineComment | SyntaxKind::TokenSingleLineInnerComment => {
+                    has_header_doc = true;
+                }
+                SyntaxKind::TokenSingleLineDocComment => {
+                    break;
+                }
+                _ => {}
+            }
+            split_index += 1;
+        }
+        if !has_header_doc {
+            return None;
+        }
+        // Split the trivia into header doc and the rest.
+        let leading_trivia = self.next_terminal.leading_trivia.clone();
+        let (header_doc, rest) = leading_trivia.split_at(split_index);
+        self.next_terminal.leading_trivia = rest.to_vec();
+        let empty_lexer_terminal = LexerTerminal {
+            text: "".into(),
+            kind: SyntaxKind::TerminalEmpty,
+            leading_trivia: header_doc.to_vec(),
+            trailing_trivia: vec![],
+        };
+        self.offset = self.offset.add_width(empty_lexer_terminal.width(self.db));
+
+        let empty_terminal = self.add_trivia_to_terminal::<TerminalEmpty>(empty_lexer_terminal);
+        Some(ItemHeaderDoc::new_green(self.db, empty_terminal))
     }
 
     /// If the current terminal is of kind `Terminal`, returns its Green wrapper. Otherwise, returns

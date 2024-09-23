@@ -2,14 +2,18 @@ use std::fmt;
 
 use cairo_lang_defs::patcher::{PatchBuilder, RewriteNode};
 use cairo_lang_defs::plugin::{
-    InlineMacroExprPlugin, InlinePluginResult, NamedPlugin, PluginDiagnostic, PluginGeneratedFile,
+    InlineMacroExprPlugin, InlinePluginResult, MacroPluginMetadata, NamedPlugin, PluginDiagnostic,
+    PluginGeneratedFile,
 };
 use cairo_lang_defs::plugin_utils::{try_extract_unnamed_arg, unsupported_bracket_diagnostic};
 use cairo_lang_filesystem::span::{TextSpan, TextWidth};
 use cairo_lang_syntax::node::db::SyntaxGroup;
 use cairo_lang_syntax::node::{ast, TypedStablePtr, TypedSyntaxNode};
 use cairo_lang_utils::{try_extract_matches, OptionHelper};
+use indoc::indoc;
 use num_bigint::{BigInt, Sign};
+
+pub const FELT252_BYTES: usize = 31;
 
 /// Macro for writing into a formatter.
 #[derive(Debug, Default)]
@@ -22,8 +26,37 @@ impl InlineMacroExprPlugin for WriteMacro {
         &self,
         db: &dyn SyntaxGroup,
         syntax: &ast::ExprInlineMacro,
+        _metadata: &MacroPluginMetadata<'_>,
     ) -> InlinePluginResult {
         generate_code_inner(syntax, db, false)
+    }
+
+    fn documentation(&self) -> Option<String> {
+        Some(
+            indoc! {r#"
+            Writes formatted data into a formatter.
+
+            This macro accepts a `formatter`, a format string, and a list of arguments. \
+            Arguments will be formatted according to the specified format string and the result \
+            will be passed to the formatter. The formatter is of the type `core::fmt::Formatter`. \
+            The macro returns `Result<(), core::fmt::Error>`.
+
+            # Panics
+            Panics if any of the formatting of arguments fails.
+
+            # Examples
+            ```cairo
+            let f: core::fmt::Formatter = Default::default();
+            write!(f, "hello"); // `f` contains "hello".
+            let world: ByteArray = "world"; 
+            write!(f, "hello {}", world_ba); // `f` contains "hellohello world".
+            write!(f, "hello {world_ba}"); // `f` contains "hellohello worldhello world".
+            let (x, y) = (1, 2);
+            write!(f, "{x} + {y} = 3");  // `f` contains "hellohello worldhello world1 + 2 = 3".
+            ```
+        "#}
+            .to_string(),
+        )
     }
 }
 
@@ -38,8 +71,37 @@ impl InlineMacroExprPlugin for WritelnMacro {
         &self,
         db: &dyn SyntaxGroup,
         syntax: &ast::ExprInlineMacro,
+        _metadata: &MacroPluginMetadata<'_>,
     ) -> InlinePluginResult {
         generate_code_inner(syntax, db, true)
+    }
+
+    fn documentation(&self) -> Option<String> {
+        Some(
+            indoc! {r#"
+            Writes formatted data into a formatter, with an additional newline.
+
+            This macro accepts a `formatter`, a format string, and a list of arguments. \
+            Arguments will be formatted according to the specified format string and the result \
+            will be passed to the formatter. The formatter is of the type `core::fmt::Formatter`. \
+            The macro returns `Result<(), core::fmt::Error>`.
+
+            # Panics
+            Panics if any of the formatting of arguments fails.
+
+            # Examples
+            ```cairo
+            let f: core::fmt::Formatter = Default::default();
+            writeln!(f, "hello"); // `f` contains "hello\n".
+            let world: ByteArray = "world"; 
+            writeln!(f, "hello {}", world_ba); // `f` contains "hello\nhello world\n".
+            writeln!(f, "hello {world_ba}"); // `f` contains "hello\nhello world\nhello world\n".
+            let (x, y) = (1, 2);
+            writeln!(f, "{x}+{y}=3"); // `f` contains "hello\nhello world\nhello world\n1+2=3\n".
+            ```
+        "#}
+            .to_string(),
+        )
     }
 }
 
@@ -221,7 +283,8 @@ impl FormattingInfo {
                             &mut pending_chars,
                             RewriteNode::mapped_text(
                                 &format!("__write_macro_arg{positional}__"),
-                                arg.as_syntax_node().span_without_trivia(builder.db),
+                                builder.db,
+                                arg,
                             ),
                             argument_info.formatting_trait,
                         );
@@ -235,7 +298,8 @@ impl FormattingInfo {
                                 &mut pending_chars,
                                 RewriteNode::mapped_text(
                                     &format!("__write_macro_arg{i}__"),
-                                    self.args[i].as_syntax_node().span_without_trivia(builder.db),
+                                    builder.db,
+                                    &self.args[i],
                                 ),
                                 argument_info.formatting_trait,
                             );
@@ -253,7 +317,10 @@ impl FormattingInfo {
                             &mut pending_chars,
                             RewriteNode::new_modified(vec![
                                 RewriteNode::text("@"),
-                                RewriteNode::mapped_text(&argument, TextSpan { start, end }),
+                                RewriteNode::Mapped {
+                                    origin: TextSpan { start, end },
+                                    node: RewriteNode::text(&argument).into(),
+                                },
                             ]),
                             argument_info.formatting_trait,
                         );
@@ -347,7 +414,6 @@ impl FormattingInfo {
         pending_chars: &mut String,
         ident_count: usize,
     ) {
-        const FELT252_BYTES: usize = 31;
         for chunk in pending_chars.as_bytes().chunks(FELT252_BYTES) {
             self.add_indentation(builder, ident_count);
             builder.add_modified(RewriteNode::interpolate_patched(

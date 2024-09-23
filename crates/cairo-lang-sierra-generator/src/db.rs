@@ -87,7 +87,7 @@ pub trait SierraGenGroup: LoweringGroup + Upcast<dyn LoweringGroup> {
     /// A type depends on another type if it contains or may contain it, as a field or by holding a
     /// reference to it.
     #[salsa::invoke(crate::types::type_dependencies)]
-    fn type_dependencies(&self, type_id: semantic::TypeId) -> Maybe<Arc<Vec<semantic::TypeId>>>;
+    fn type_dependencies(&self, type_id: semantic::TypeId) -> Maybe<Arc<[semantic::TypeId]>>;
 
     /// Returns the [cairo_lang_sierra::program::FunctionSignature] object for the given function
     /// id.
@@ -120,14 +120,14 @@ pub trait SierraGenGroup: LoweringGroup + Upcast<dyn LoweringGroup> {
     #[salsa::invoke(ap_change::get_ap_change)]
     fn get_ap_change(&self, function_id: ConcreteFunctionWithBodyId) -> Maybe<SierraApChange>;
 
-    /// Returns the [cairo_lang_sierra::program::Program] object of the requested functions.
+    /// Returns the [SierraProgramWithDebug] object of the requested functions.
     #[salsa::invoke(program_generator::get_sierra_program_for_functions)]
     fn get_sierra_program_for_functions(
         &self,
         requested_function_ids: Vec<ConcreteFunctionWithBodyId>,
     ) -> Maybe<Arc<SierraProgramWithDebug>>;
 
-    /// Returns the [cairo_lang_sierra::program::Program] object of the requested crates.
+    /// Returns the [SierraProgramWithDebug] object of the requested crates.
     #[salsa::invoke(program_generator::get_sierra_program)]
     fn get_sierra_program(
         &self,
@@ -208,7 +208,7 @@ fn get_type_info(
                 storable: false,
                 droppable: false,
                 duplicatable: false,
-                zero_sized: false,
+                zero_sized: true,
             }));
         }
     };
